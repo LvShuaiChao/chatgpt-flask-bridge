@@ -299,7 +299,76 @@
     '#cgpt-autoq-send-once',
   ].join(',');
 
+  function mapToolboxAuthorityCacheToSnapshot(authority, source) {
+    const flags = authority && authority.flags ? authority.flags : {};
+    const composer = authority && authority.composer ? authority.composer : {};
+    const reply = authority && authority.reply ? authority.reply : {};
+    const raw = authority && authority.raw ? authority.raw : {};
+    const closedLoopRunning = !!(
+      typeof window !== 'undefined'
+      && window.__cgptToolboxRunningOwner
+      && String(
+        window.__cgptToolboxRunningOwner.taskKey
+        || window.__cgptToolboxRunningOwner.owner
+        || '',
+      ).trim()
+    );
+    let disabledReason = '';
+    if (flags.pageOffline === true) {
+      disabledReason = 'page_offline';
+    } else if (flags.replyBusy === true && flags.canSend !== true) {
+      disabledReason = 'reply_busy';
+    } else if (flags.taskBusy === true) {
+      disabledReason = 'task_busy';
+    }
+    const sendPhase = String(reply.state || 'unknown');
+    let buttonColorRole = 'normal';
+    if (closedLoopRunning || flags.pendingSend === true || sendPhase === 'waiting_send') {
+      buttonColorRole = 'running';
+    }
+    if (disabledReason) {
+      buttonColorRole = 'blocked';
+    }
+    return {
+      source,
+      responseState: String(raw.responseState || '').trim().toLowerCase(),
+      responseReason: String(raw.responseReason || '').trim().toLowerCase(),
+      inputable: flags.canInput === true,
+      sendable: flags.canSend === true,
+      assistantBusy: flags.replyBusy === true,
+      canSendByHeader: flags.canSend === true,
+      replyBusy: flags.replyBusy === true,
+      taskBusy: flags.taskBusy === true,
+      attachmentBusy: composer.composerUploading === true,
+      closedLoopRunning,
+      pendingSend: flags.pendingSend === true,
+      realSendReady: composer.realSendButtonReady === true || composer.hasRealSendButton === true,
+      sendPhase,
+      disabledReason,
+      buttonColorRole,
+    };
+  }
+
   function getUnifiedButtonAuthoritySnapshot(source = '-') {
+    try {
+      const cached = (
+        typeof window !== 'undefined'
+        && window.__cgptToolboxAuthorityCache
+        && typeof window.__cgptToolboxAuthorityCache === 'object'
+        && window.__cgptToolboxAuthorityCache.flags
+      )
+        ? window.__cgptToolboxAuthorityCache
+        : null;
+      if (cached) {
+        return mapToolboxAuthorityCacheToSnapshot(cached, source);
+      }
+    } catch (e) {
+      console.error('[TOOLBOX_BUTTON_STATE][CACHE_READ_FAILED]', {
+        source,
+        error: e && e.stack ? e.stack : String(e),
+      });
+    }
+
     const bridgeState = (
       typeof window !== 'undefined'
       && window.__cgptBridgeState
@@ -332,6 +401,36 @@
       || responseReason === 'assistant_busy'
     );
 
+    const pendingSend = (
+      responseState === 'waiting_send'
+      || responseReason === 'waiting_send'
+      || bridgeState.pending_send === true
+      || bridgeState.pendingSend === true
+    );
+    const closedLoopRunning = !!(
+      typeof window !== 'undefined'
+      && window.__cgptToolboxRunningOwner
+      && String(
+        window.__cgptToolboxRunningOwner.taskKey
+        || window.__cgptToolboxRunningOwner.owner
+        || '',
+      ).trim()
+    );
+    let disabledReason = '';
+    if (bridgeState.page_offline === true || bridgeState.pageOffline === true) {
+      disabledReason = 'page_offline';
+    } else if (assistantBusy) {
+      disabledReason = 'reply_busy';
+    }
+    const sendPhase = pendingSend ? 'waiting_send' : (assistantBusy ? 'answering' : 'unknown');
+    let buttonColorRole = 'normal';
+    if (closedLoopRunning || pendingSend || sendPhase === 'waiting_send') {
+      buttonColorRole = 'running';
+    }
+    if (disabledReason) {
+      buttonColorRole = 'blocked';
+    }
+
     return {
       source,
       responseState,
@@ -340,7 +439,121 @@
       sendable,
       assistantBusy,
       canSendByHeader: inputable && sendable && !assistantBusy,
+      replyBusy: assistantBusy,
+      taskBusy: false,
+      attachmentBusy: bridgeState.uploading === true || bridgeState.attachment_uploading === true,
+      closedLoopRunning,
+      pendingSend,
+      realSendReady: sendable,
+      sendPhase,
+      disabledReason,
+      buttonColorRole,
     };
+  }
+
+  function normalizeBooleanForButtonState(value) {
+    return value === true || value === 1 || value === '1' || value === 'true';
+  }
+
+  function normalizeButtonAuthoritySnapshot(raw, source) {
+    const now = Date.now();
+    const snapshot = raw && typeof raw === 'object' ? raw : {};
+    const replyBusy = normalizeBooleanForButtonState(snapshot.replyBusy || snapshot.reply_busy || snapshot.isReplyBusy || snapshot.assistantBusy);
+    const taskBusy = normalizeBooleanForButtonState(snapshot.taskBusy || snapshot.task_busy || snapshot.isTaskBusy);
+    const attachmentBusy = normalizeBooleanForButtonState(snapshot.attachmentBusy || snapshot.attachment_busy || snapshot.uploading);
+    const closedLoopRunning = normalizeBooleanForButtonState(snapshot.closedLoopRunning || snapshot.closed_loop_running);
+    const pendingSend = normalizeBooleanForButtonState(snapshot.pendingSend || snapshot.pending_send);
+    const realSendReady = normalizeBooleanForButtonState(snapshot.realSendReady || snapshot.real_send_ready);
+    const sendable = normalizeBooleanForButtonState(snapshot.sendable);
+    const inputable = normalizeBooleanForButtonState(snapshot.inputable);
+    const sendPhase = String(snapshot.sendPhase || snapshot.send_phase || 'unknown');
+    const disabledReason = String(snapshot.disabledReason || snapshot.disabled_reason || '');
+    let buttonColorRole = snapshot.buttonColorRole || snapshot.button_color_role || 'normal';
+    if (closedLoopRunning || pendingSend || sendPhase === 'waiting_send') {
+      buttonColorRole = 'running';
+    }
+    if (disabledReason) {
+      buttonColorRole = 'blocked';
+    }
+    const visualState = {
+      replyBusy,
+      taskBusy,
+      attachmentBusy,
+      closedLoopRunning,
+      pendingSend,
+      realSendReady,
+      sendable,
+      inputable,
+      sendPhase,
+      disabledReason,
+      buttonColorRole,
+      source: source || snapshot.source || 'button-state',
+      ts: now,
+    };
+    return {
+      ...snapshot,
+      ...visualState,
+      visualState,
+    };
+  }
+
+  function resolveButtonAuthoritySnapshot(reason) {
+    const startedAt = Date.now();
+    try {
+      const raw = getUnifiedButtonAuthoritySnapshot(
+        reason || 'resolveButtonAuthoritySnapshot',
+      );
+      const normalized = normalizeButtonAuthoritySnapshot(
+        raw,
+        'core/button-state:getUnifiedButtonAuthoritySnapshot',
+      );
+      console.log('[TOOLBOX_BUTTON_STATE][AUTHORITY_RESOLVED]', {
+        reason: reason || '',
+        replyBusy: normalized.replyBusy,
+        taskBusy: normalized.taskBusy,
+        attachmentBusy: normalized.attachmentBusy,
+        closedLoopRunning: normalized.closedLoopRunning,
+        pendingSend: normalized.pendingSend,
+        realSendReady: normalized.realSendReady,
+        sendable: normalized.sendable,
+        inputable: normalized.inputable,
+        sendPhase: normalized.sendPhase,
+        disabledReason: normalized.disabledReason,
+        buttonColorRole: normalized.buttonColorRole,
+        costMs: Date.now() - startedAt,
+        ts: normalized.ts,
+      });
+      return normalized;
+    } catch (e) {
+      console.error('[TOOLBOX_BUTTON_STATE][AUTHORITY_RESOLVE_FAILED]', {
+        reason: reason || '',
+        error: e && e.stack ? e.stack : String(e),
+        costMs: Date.now() - startedAt,
+      });
+      return normalizeButtonAuthoritySnapshot(
+        {
+          replyBusy: true,
+          taskBusy: false,
+          attachmentBusy: false,
+          closedLoopRunning: false,
+          pendingSend: false,
+          realSendReady: false,
+          sendable: false,
+          inputable: false,
+          sendPhase: 'authority_error',
+          disabledReason: 'button_authority_error',
+          buttonColorRole: 'blocked',
+        },
+        'core/button-state:fallback-error',
+      );
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.ToolboxButtonState = window.ToolboxButtonState || {};
+    window.ToolboxButtonState.getUnifiedButtonAuthoritySnapshot = getUnifiedButtonAuthoritySnapshot;
+    window.ToolboxButtonState.resolveButtonAuthoritySnapshot = resolveButtonAuthoritySnapshot;
+    window.ToolboxButtonState.normalizeButtonAuthoritySnapshot = normalizeButtonAuthoritySnapshot;
   }
 
   function isButtonStateDebugEnabled() {
@@ -1019,6 +1232,37 @@
     };
 
     const oldPhase = button.dataset.cgptButtonPhase || '-';
+    const externalPhaseBeforeApply = button.dataset.cgptButtonPhase || '-';
+    const externalTaskPhaseBeforeApply = button.dataset.cgptTaskPhase || '-';
+    const externalReasonBeforeApply = button.dataset.cgptButtonReason || '-';
+    if (
+      reason
+      && typeof ToolboxShell !== 'undefined'
+      && ToolboxShell
+      && typeof ToolboxShell.appendLogIfChanged === 'function'
+    ) {
+      ToolboxShell.appendLogIfChanged(
+        `BUTTON_STATE_WRITE_ENTRY:${button.id || '-'}`,
+        [
+          button.id || '-',
+          phase || '-',
+          text || '-',
+          disabled ? '1' : '0',
+          reason || '-',
+        ].join('|'),
+        [
+          '[BUTTON_STATE][WRITE_ENTRY]',
+          `id=${button.id || '-'}`,
+          `oldPhase=${externalPhaseBeforeApply}`,
+          `oldTaskPhase=${externalTaskPhaseBeforeApply}`,
+          `nextPhase=${phase || '-'}`,
+          `disabled=${disabled ? 1 : 0}`,
+          `reason=${reason || '-'}`,
+          `prevReason=${externalReasonBeforeApply}`,
+        ].join(' '),
+        1200,
+      );
+    }
     const rawViewText = text != null ? String(text) : '';
     const rawViewTitle = title != null ? String(title) : '';
     let nextText = rawViewText;
@@ -1570,6 +1814,8 @@
   const ButtonState = Object.freeze({
     Phase: ButtonPhase,
     getUnifiedButtonAuthoritySnapshot,
+    resolveButtonAuthoritySnapshot,
+    normalizeButtonAuthoritySnapshot,
     BusyPhases: BUTTON_BUSY_PHASES,
     SendMessageButtonIds: SEND_MESSAGE_BUTTON_IDS,
     SendBtnAllowedColorClasses: SEND_BTN_ALLOWED_COLOR_CLASSES,

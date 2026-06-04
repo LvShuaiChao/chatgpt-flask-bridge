@@ -41,7 +41,15 @@ const ToolboxActionDispatch = (() => {
     }
 
     const button = ctx.button instanceof HTMLElement ? ctx.button : null;
-    if (button && button.id && typeof ToolboxActionRegistry !== 'undefined' && ToolboxActionRegistry) {
+    if (button && button.id === 'cgpt-copy-last-message-scroll-bottom') {
+      canonical = (
+        typeof ToolboxActionRegistry !== 'undefined'
+        && ToolboxActionRegistry
+        && ToolboxActionRegistry.ACTION
+      )
+        ? ToolboxActionRegistry.ACTION.COPY_ONLY
+        : 'copy-only';
+    } else if (button && button.id && typeof ToolboxActionRegistry !== 'undefined' && ToolboxActionRegistry) {
       const fromId = ToolboxActionRegistry.resolveActionFromButtonId(button.id);
       if (fromId && (!canonical || canonical === raw)) {
         canonical = fromId;
@@ -101,6 +109,44 @@ const ToolboxActionDispatch = (() => {
     const button = ctx.button || null;
     const event = ctx.event || null;
     let dispatchAction = action;
+
+    if (button instanceof HTMLElement && button.id === 'cgpt-copy-last-message-scroll-bottom') {
+      dispatchAction = 'copy-only';
+      const resolvedCopyOnly = resolveCanonicalAction(dispatchAction, ctx);
+      appendDispatchLog(
+        `[ACTION_DISPATCH][COPY_ONLY_HIT] raw=${resolvedCopyOnly.raw || '-'} resolvedAction=${resolvedCopyOnly.canonical || '-'} source=${source} id=${button.id}`,
+      );
+      const payloadBlockCopyOnly = precheckPayload(resolvedCopyOnly.canonical, ctx);
+      if (payloadBlockCopyOnly.blocked) {
+        return false;
+      }
+      if (typeof executor !== 'function') {
+        console.error('[ToolboxActionDispatch] no executor registered', {
+          action: resolvedCopyOnly.canonical,
+          source,
+        });
+        appendDispatchLog(
+          `[ACTION_DISPATCH][MISS] reason=no-executor action=${resolvedCopyOnly.canonical || '-'} source=${source}`,
+        );
+        return false;
+      }
+      try {
+        return executor(
+          resolvedCopyOnly.handlerAction || resolvedCopyOnly.canonical,
+          button,
+          source,
+          event,
+          resolvedCopyOnly,
+        );
+      } catch (err) {
+        console.error('[ToolboxActionDispatch] executor failed', err);
+        const errText = err && err.message ? err.message : String(err);
+        appendDispatchLog(
+          `[ACTION_DISPATCH][ERROR] action=${resolvedCopyOnly.canonical || '-'} source=${source} error=${errText}`,
+        );
+        return false;
+      }
+    }
 
     if (button instanceof HTMLElement) {
       const runtimeAction = String(button.dataset.cgptRuntimeAction || '').trim();

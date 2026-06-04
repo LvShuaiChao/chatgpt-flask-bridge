@@ -41,22 +41,30 @@
     }
 
     function getClosedLoopOwnerFromSnapshot(snapshot = {}) {
+      const closedLoopRunning = snapshot.closedLoopContinueRunning === true
+        || (
+          typeof window !== 'undefined'
+          && window.__cgptClosedLoopState
+          && window.__cgptClosedLoopState.running === true
+        );
+      if (!closedLoopRunning) {
+        return '';
+      }
+
       const direct = String(
         snapshot.closedLoopOwner
         || snapshot.closedLoopContinueOwner
-        || snapshot.owner
-        || snapshot.taskOwner
         || '',
       ).trim();
-      if (direct) {
+      if (direct && isClosedLoopButtonAction(direct)) {
         return direct;
       }
       const runningOwner = getToolboxRunningOwnerFromRuntime(snapshot);
       if (runningOwner && runningOwner.action) {
-        return String(runningOwner.action).trim();
-      }
-      if (!snapshot.closedLoopContinueRunning) {
-        return '';
+        const ownerAction = String(runningOwner.action).trim();
+        if (isClosedLoopButtonAction(ownerAction)) {
+          return ownerAction;
+        }
       }
       const mode = String(snapshot.closedLoopContinueMode || snapshot.closedLoopMode || '').trim();
       if (mode === 'without_hotkey') {
@@ -102,6 +110,7 @@
         || t.includes('停止环继续')
         || t.startsWith('环-')
         || t.includes('快捷键模式+每')
+        || t.includes('快捷键+每')
         || t.includes('仅对话+每');
     }
 
@@ -142,10 +151,10 @@
         ? ClosedLoopConfig.CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL
         : '每1轮上传';
       if (normalized === 'closed-loop-with-hotkey-upload-every-round') {
-        return `闭环-快捷键模式+${everyRoundLabel}`;
+        return `闭环-快捷键+${everyRoundLabel}`;
       }
       if (normalized === 'closed-loop-with-hotkey') {
-        return '闭环-快捷键模式+每5轮上传';
+        return '闭环-快捷键+每5轮上传';
       }
       if (normalized === 'closed-loop-without-hotkey') {
         return '闭环-仅对话+每5轮上传';
@@ -215,6 +224,76 @@
       return !!normalizedAction && normalizedAction === pendingAction;
     }
 
+    function isStaleSendMessageOwnerByPageSnapshot(snapshot = {}) {
+      const authority = (
+        snapshot.toolboxStatusAuthority
+        || snapshot.statusAuthority
+        || snapshot.topStatusAuthority
+        || snapshot.toolboxUnifiedAuthority
+        || {}
+      );
+      const replyState = String(
+        authority.replyState
+        || (authority.reply && authority.reply.state)
+        || snapshot.replyState
+        || '',
+      ).trim().toLowerCase();
+      const composerTextLen = Number(
+        authority.composerTextLen
+        || (authority.composer && authority.composer.textLen)
+        || snapshot.composerTextLen
+        || 0,
+      ) || 0;
+      const realSendButtonFound = !!(
+        authority.realSendButtonFound
+        || (authority.composer && authority.composer.hasRealSendButton)
+        || snapshot.realSendButtonFound
+      );
+      const responseState = String(
+        authority.responseState
+        || authority.responseStateRaw
+        || (authority.raw && authority.raw.responseState)
+        || snapshot.responseState
+        || '',
+      ).trim().toLowerCase();
+
+      return (
+        replyState === 'ready'
+        && composerTextLen === 0
+        && !realSendButtonFound
+        && responseState === 'idle'
+      );
+    }
+
+    function isRealSendMessageTaskRunning(sendMessageTask, snapshot = {}, reason = '') {
+      const sendPhase = sendMessageTask && sendMessageTask.phase
+        ? String(sendMessageTask.phase).trim().toLowerCase()
+        : '';
+
+      const isRealSendTaskRunning =
+        sendMessageTask
+        && sendMessageTask.running === true
+        && !['idle', 'done', 'failed', 'cancelled'].includes(sendPhase);
+
+      if (!isRealSendTaskRunning) {
+        return false;
+      }
+
+      if (isStaleSendMessageOwnerByPageSnapshot(snapshot)) {
+        console.warn('[BUTTON_OWNER][IGNORE_STALE_SEND_MESSAGE]', {
+          reason,
+          sendPhase,
+          replyState: 'ready',
+          composerTextLen: 0,
+          realSendButtonFound: 0,
+          responseState: 'idle',
+        });
+        return false;
+      }
+
+      return true;
+    }
+
     function resolveCurrentToolboxOwnerInfo(snapshot = {}) {
       if (snapshot.closedLoopContinueRunning === true) {
         return {
@@ -226,7 +305,7 @@
       const sendMessageTask = snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
         ? snapshot.sendMessageTask
         : {};
-      if (sendMessageTask.running === true) {
+      if (isRealSendMessageTaskRunning(sendMessageTask, snapshot, 'resolveCurrentToolboxOwnerInfo')) {
         return {
           action: String(sendMessageTask.action || 'send-message').trim() || 'send-message',
           phase: String(sendMessageTask.phase || 'running').trim() || 'running',
@@ -299,6 +378,69 @@
     }
 
     function buildClosedLoopPageBusyIdleView(action, snapshot = {}) {
+      void snapshot;
+      const startedAt = Date.now();
+      const reason = 'closed-loop-button-vm:buildClosedLoopPageBusyIdleView';
+      let authoritySnapshot;
+      try {
+        if (
+          window.ToolboxButtonState
+          && typeof window.ToolboxButtonState.resolveButtonAuthoritySnapshot === 'function'
+        ) {
+          authoritySnapshot = window.ToolboxButtonState.resolveButtonAuthoritySnapshot(reason);
+        } else {
+          console.error('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_MISSING]', {
+            reason,
+          });
+          authoritySnapshot = {
+            replyBusy: true,
+            taskBusy: false,
+            attachmentBusy: false,
+            closedLoopRunning: false,
+            pendingSend: false,
+            sendPhase: 'authority_missing',
+            disabledReason: 'button_authority_missing',
+            buttonColorRole: 'blocked',
+            source: 'closed-loop-button-vm:fallback-authority-missing',
+            ts: Date.now(),
+          };
+        }
+      } catch (e) {
+        console.error('[CLOSED_LOOP_BUTTON_VM][AUTHORITY_FAILED]', {
+          reason,
+          error: e && e.stack ? e.stack : String(e),
+        });
+        authoritySnapshot = {
+          replyBusy: true,
+          taskBusy: false,
+          attachmentBusy: false,
+          closedLoopRunning: false,
+          pendingSend: false,
+          sendPhase: 'authority_error',
+          disabledReason: 'button_authority_error',
+          buttonColorRole: 'blocked',
+          source: 'closed-loop-button-vm:fallback-authority-error',
+          ts: Date.now(),
+        };
+      }
+      const busy = authoritySnapshot.replyBusy === true
+        || authoritySnapshot.taskBusy === true
+        || authoritySnapshot.attachmentBusy === true
+        || authoritySnapshot.pendingSend === true
+        || authoritySnapshot.sendPhase === 'waiting_send';
+      console.log('[CLOSED_LOOP_BUTTON_VM][BUSY_IDLE_VIEW]', {
+        reason,
+        busy,
+        idle: !busy,
+        disabledReason: authoritySnapshot.disabledReason || '',
+        sendPhase: authoritySnapshot.sendPhase || 'unknown',
+        replyBusy: authoritySnapshot.replyBusy === true,
+        taskBusy: authoritySnapshot.taskBusy === true,
+        attachmentBusy: authoritySnapshot.attachmentBusy === true,
+        closedLoopRunning: authoritySnapshot.closedLoopRunning === true,
+        pendingSend: authoritySnapshot.pendingSend === true,
+        costMs: Date.now() - startedAt,
+      });
       const normalizedAction = String(action || '').trim();
       const idleText = getClosedLoopIdleTextByAction(normalizedAction, snapshot);
       return withClosedLoopStyleFields({

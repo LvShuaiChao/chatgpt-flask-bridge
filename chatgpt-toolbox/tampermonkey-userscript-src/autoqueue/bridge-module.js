@@ -3218,6 +3218,9 @@
               && typeof UploadModule.renderUploadButtonsOnly === 'function'
             ) {
               try {
+                if (typeof UploadModule.clearStaleWaitingSendWhenComposerEmpty === 'function') {
+                  UploadModule.clearStaleWaitingSendWhenComposerEmpty('bridge-poll-capability-change');
+                }
                 if (typeof UploadModule.maybeHealStaleWaitingReplyState === 'function') {
                   UploadModule.maybeHealStaleWaitingReplyState('bridge-poll-capability-change');
                 }

@@ -117,61 +117,47 @@
     let copyPipelineFallbackWarnedOnce = false;
 
     function stripChatGptInstrumentsLabel(text) {
-      if (typeof TextNormalizer !== 'undefined' && TextNormalizer && typeof TextNormalizer.stripLabel === 'function') {
-        return TextNormalizer.stripLabel(text);
-      }
-      if (
-        typeof CopyPipeline !== 'undefined'
-        && CopyPipeline
-        && typeof CopyPipeline.strip === 'function'
-      ) {
-        return CopyPipeline.strip(text);
-      }
-
-      if (!copyPipelineFallbackWarnedOnce) {
-        copyPipelineFallbackWarnedOnce = true;
-        const line = '[COPY_PIPELINE][MISSING] strip fallback used';
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(line);
-        } else {
-          console.warn(line);
+      try {
+        const normalizer = (
+          typeof window !== 'undefined' && window.TextNormalizer
+        ) ? window.TextNormalizer : (
+          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
+        );
+        if (normalizer && typeof normalizer.stripLabel === 'function') {
+          return normalizer.stripLabel(text);
         }
+        console.error('[CORE_MAIN][TEXT_NORMALIZER_MISSING]', {
+          fn: 'stripLabel',
+        });
+        return String(text == null ? '' : text);
+      } catch (e) {
+        console.error('[CORE_MAIN][STRIP_INSTRUMENTS_LABEL_FAILED]', {
+          error: e && e.stack ? e.stack : String(e),
+        });
+        return String(text == null ? '' : text);
       }
-
-      // Minimal fallback: keep only "strip Instruments label + normalize newlines".
-      return String(text || '')
-        .replace(/ChatGPT\s*Instruments\s*/gi, '\n')
-        .replace(/\r\n/g, '\n')
-        .replace(/\n{2,}/g, '\n')
-        .trim();
     }
 
     function collapseInstrumentsCalculatorReply(text) {
-      if (typeof TextNormalizer !== 'undefined'
-        && TextNormalizer
-        && typeof TextNormalizer.collapseInstrumentsCalculatorReply === 'function') {
-        return TextNormalizer.collapseInstrumentsCalculatorReply(text);
-      }
-      if (
-        typeof CopyPipeline !== 'undefined'
-        && CopyPipeline
-        && typeof CopyPipeline.collapseInstrumentsCalculatorReply === 'function'
-      ) {
-        return CopyPipeline.collapseInstrumentsCalculatorReply(text);
-      }
-
-      if (!copyPipelineFallbackWarnedOnce) {
-        copyPipelineFallbackWarnedOnce = true;
-        const line = '[COPY_PIPELINE][MISSING] collapse fallback used';
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
-          ToolboxShell.appendLog(line);
-        } else {
-          console.warn(line);
+      try {
+        const normalizer = (
+          typeof window !== 'undefined' && window.TextNormalizer
+        ) ? window.TextNormalizer : (
+          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
+        );
+        if (normalizer && typeof normalizer.collapseInstrumentsCalculatorReply === 'function') {
+          return normalizer.collapseInstrumentsCalculatorReply(text);
         }
+        console.error('[CORE_MAIN][TEXT_NORMALIZER_MISSING]', {
+          fn: 'collapseInstrumentsCalculatorReply',
+        });
+        return String(text == null ? '' : text);
+      } catch (e) {
+        console.error('[CORE_MAIN][COLLAPSE_CALCULATOR_REPLY_FAILED]', {
+          error: e && e.stack ? e.stack : String(e),
+        });
+        return String(text == null ? '' : text);
       }
-
-      // Minimal fallback: do not re-implement collapse logic; just strip the label.
-      return stripChatGptInstrumentsLabel(text);
     }
 
     function cleanMessageText(text) {
@@ -1727,6 +1713,9 @@
   }
 
   async function waitChatPageReady(options = {}) {
+    // TODO_DEDUP: core/page-lifecycle.js 中已有 waitChatPageReady 候选实现，
+    // 但当前未确认已进入 .build-order.json。本轮不要直接切换依赖，避免运行时未定义。
+    // 后续应在确认 build order 后，将 main.js 中该函数改成委托 ToolboxPageLifecycle.waitChatPageReady。
     const timeoutMs = Number(options.timeoutMs || 30000);
     const startedAt = Date.now();
 
@@ -5744,15 +5733,52 @@
     }
 
     async function waitChatGPTNativeUploadSettled(files, options = {}) {
-      if (typeof UploadNativeRuntime !== 'undefined'
-        && UploadNativeRuntime
-        && typeof UploadNativeRuntime.waitChatGPTNativeUploadSettled === 'function') {
-        return UploadNativeRuntime.waitChatGPTNativeUploadSettled(files, {
-          ...options,
-          detectNativeUploadError: detectChatGPTNativeUploadError,
+      const startedAt = Date.now();
+      try {
+        const runtime = (
+          typeof window !== 'undefined'
+          && window.UploadNativeRuntime
+        ) ? window.UploadNativeRuntime : (
+          typeof UploadNativeRuntime !== 'undefined' ? UploadNativeRuntime : null
+        );
+        if (runtime && typeof runtime.waitChatGPTNativeUploadSettled === 'function') {
+          const result = await runtime.waitChatGPTNativeUploadSettled(files, {
+            ...(options || {}),
+            reason: (options && options.reason) || 'core-main:waitChatGPTNativeUploadSettled',
+            detectNativeUploadError: detectChatGPTNativeUploadError,
+          });
+          console.log('[CORE_MAIN][DELEGATE_UPLOAD_SETTLED]', {
+            result,
+            delegate: 'UploadNativeRuntime.waitChatGPTNativeUploadSettled',
+            costMs: Date.now() - startedAt,
+          });
+          return result;
+        }
+        console.error('[CORE_MAIN][UPLOAD_NATIVE_RUNTIME_MISSING]', {
+          options: options || {},
+          costMs: Date.now() - startedAt,
         });
+        return {
+          ok: false,
+          reason: 'upload_native_runtime_missing',
+          costMs: Date.now() - startedAt,
+        };
+      } catch (e) {
+        console.error('[CORE_MAIN][WAIT_UPLOAD_SETTLED_FAILED]', {
+          options: options || {},
+          error: e && e.stack ? e.stack : String(e),
+          costMs: Date.now() - startedAt,
+        });
+        return {
+          ok: false,
+          reason: 'wait_upload_settled_exception',
+          error: String(e && e.message ? e.message : e),
+          costMs: Date.now() - startedAt,
+        };
       }
+    }
 
+    async function __REMOVE_waitChatGPTNativeUploadSettled_fallback(files, options = {}) {
       const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
       const pollMs = Number(options.pollMs) || 500;
       const stableMs = Math.max(1200, Math.min(1500, Number(options.stableMs) || 1300));

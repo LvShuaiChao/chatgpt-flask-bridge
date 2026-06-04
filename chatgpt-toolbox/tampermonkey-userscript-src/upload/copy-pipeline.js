@@ -12,17 +12,47 @@
     }
 
     function stripChatGptInstrumentsLabel(text) {
-      if (typeof TextNormalizer !== 'undefined' && TextNormalizer && typeof TextNormalizer.stripLabel === 'function') {
-        return TextNormalizer.stripLabel(text);
+      try {
+        const normalizer = (
+          typeof window !== 'undefined' && window.TextNormalizer
+        ) ? window.TextNormalizer : (
+          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
+        );
+        if (normalizer && typeof normalizer.stripLabel === 'function') {
+          return normalizer.stripLabel(text);
+        }
+        console.error('[COPY_PIPELINE][TEXT_NORMALIZER_MISSING]', {
+          fn: 'stripLabel',
+        });
+        return String(text == null ? '' : text);
+      } catch (e) {
+        console.error('[COPY_PIPELINE][STRIP_INSTRUMENTS_LABEL_FAILED]', {
+          error: e && e.stack ? e.stack : String(e),
+        });
+        return String(text == null ? '' : text);
       }
-      return String(text || '').replace(/ChatGPT\s*Instruments\s*/gi, '\n').replace(/\r\n/g, '\n').replace(/\n{2,}/g, '\n').trim();
     }
 
     function collapseInstrumentsCalculatorReply(text) {
-      if (typeof TextNormalizer !== 'undefined' && TextNormalizer && typeof TextNormalizer.collapseInstrumentsCalculatorReply === 'function') {
-        return TextNormalizer.collapseInstrumentsCalculatorReply(text);
+      try {
+        const normalizer = (
+          typeof window !== 'undefined' && window.TextNormalizer
+        ) ? window.TextNormalizer : (
+          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
+        );
+        if (normalizer && typeof normalizer.collapseInstrumentsCalculatorReply === 'function') {
+          return normalizer.collapseInstrumentsCalculatorReply(text);
+        }
+        console.error('[COPY_PIPELINE][TEXT_NORMALIZER_MISSING]', {
+          fn: 'collapseInstrumentsCalculatorReply',
+        });
+        return String(text == null ? '' : text);
+      } catch (e) {
+        console.error('[COPY_PIPELINE][COLLAPSE_CALCULATOR_REPLY_FAILED]', {
+          error: e && e.stack ? e.stack : String(e),
+        });
+        return String(text == null ? '' : text);
       }
-      return stripChatGptInstrumentsLabel(text);
     }
 
     function sanitizeCopiedAssistantText(rawText) {

@@ -126,9 +126,12 @@
     };
   }
 
-  function isTopReplyBusyForButtons(snapshot = {}) {
-    const status = getTopReplyStatusFromSnapshot(snapshot);
-    return !!status.busy;
+  function isTopReplyBusyForButtons(reasonOrSnapshot) {
+    const reason = typeof reasonOrSnapshot === 'string'
+      ? reasonOrSnapshot
+      : 'upload-button-vm:isTopReplyBusyForButtons';
+    const snapshot = getButtonAuthoritySnapshot(reason);
+    return snapshot.replyBusy === true;
   }
 
   function isTopReplyAnsweringForButtons(snapshot = {}) {
@@ -150,41 +153,94 @@
     return !!topReplyBusy;
   }
 
-  function getButtonAuthoritySnapshot(source = 'upload-button-vm') {
-    if (
-      typeof ButtonState !== 'undefined'
-      && ButtonState
-      && typeof ButtonState.getUnifiedButtonAuthoritySnapshot === 'function'
-    ) {
-      return ButtonState.getUnifiedButtonAuthoritySnapshot(source);
+  function getButtonAuthoritySnapshot(reason) {
+    const startedAt = Date.now();
+    try {
+      if (
+        window.ToolboxButtonState
+        && typeof window.ToolboxButtonState.resolveButtonAuthoritySnapshot === 'function'
+      ) {
+        const snapshot = window.ToolboxButtonState.resolveButtonAuthoritySnapshot(
+          reason || 'upload-button-vm:getButtonAuthoritySnapshot',
+        );
+        console.log('[UPLOAD_BUTTON_VM][AUTHORITY_USED]', {
+          reason: reason || '',
+          source: snapshot && snapshot.source,
+          replyBusy: snapshot && snapshot.replyBusy,
+          taskBusy: snapshot && snapshot.taskBusy,
+          attachmentBusy: snapshot && snapshot.attachmentBusy,
+          closedLoopRunning: snapshot && snapshot.closedLoopRunning,
+          pendingSend: snapshot && snapshot.pendingSend,
+          realSendReady: snapshot && snapshot.realSendReady,
+          sendable: snapshot && snapshot.sendable,
+          inputable: snapshot && snapshot.inputable,
+          sendPhase: snapshot && snapshot.sendPhase,
+          disabledReason: snapshot && snapshot.disabledReason,
+          buttonColorRole: snapshot && snapshot.buttonColorRole,
+          costMs: Date.now() - startedAt,
+        });
+        return snapshot;
+      }
+      if (
+        typeof ButtonState !== 'undefined'
+        && ButtonState
+        && typeof ButtonState.resolveButtonAuthoritySnapshot === 'function'
+      ) {
+        return ButtonState.resolveButtonAuthoritySnapshot(
+          reason || 'upload-button-vm:getButtonAuthoritySnapshot',
+        );
+      }
+      console.error('[UPLOAD_BUTTON_VM][AUTHORITY_MISSING]', {
+        reason: reason || '',
+        costMs: Date.now() - startedAt,
+      });
+      return {
+        replyBusy: true,
+        taskBusy: false,
+        attachmentBusy: false,
+        closedLoopRunning: false,
+        pendingSend: false,
+        realSendReady: false,
+        sendable: false,
+        inputable: false,
+        sendPhase: 'authority_missing',
+        disabledReason: 'button_authority_missing',
+        buttonColorRole: 'blocked',
+        source: 'upload-button-vm:fallback-authority-missing',
+        ts: Date.now(),
+      };
+    } catch (e) {
+      console.error('[UPLOAD_BUTTON_VM][AUTHORITY_FAILED]', {
+        reason: reason || '',
+        error: e && e.stack ? e.stack : String(e),
+        costMs: Date.now() - startedAt,
+      });
+      return {
+        replyBusy: true,
+        taskBusy: false,
+        attachmentBusy: false,
+        closedLoopRunning: false,
+        pendingSend: false,
+        realSendReady: false,
+        sendable: false,
+        inputable: false,
+        sendPhase: 'authority_error',
+        disabledReason: 'button_authority_error',
+        buttonColorRole: 'blocked',
+        source: 'upload-button-vm:fallback-authority-error',
+        ts: Date.now(),
+      };
     }
-    return null;
   }
 
-  function isAuthorityReplyBusyForButtons(snapshot = {}) {
-    const headerAuthority = getButtonAuthoritySnapshot('reply-busy-check');
-    if (headerAuthority && headerAuthority.assistantBusy) {
-      return true;
-    }
-    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
-    const unified = snap.toolboxUnifiedAuthority;
-    if (unified && unified.flags) {
-      return unified.flags.replyBusy === true;
-    }
-    const authority = getToolboxAuthorityFromSnapshot(snapshot);
-    if (authority) {
-      return !!(
-        authority.replyBusy === true
-        || authority.shouldWaitReplyByTopStatus === true
-      );
-    }
-    const topReplyStatus = getTopReplyStatusFromSnapshot(snapshot);
-    return !!(
-      topReplyStatus.answering
-      || topReplyStatus.waitingReply
-      || topReplyStatus.sending
-      || topReplyStatus.busy
-    );
+  function isAuthorityReplyBusyForButtons(reasonOrSnapshot) {
+    const reason = typeof reasonOrSnapshot === 'string'
+      ? reasonOrSnapshot
+      : 'upload-button-vm:isAuthorityReplyBusyForButtons';
+    const snapshot = getButtonAuthoritySnapshot(reason);
+    return snapshot.replyBusy === true
+      || snapshot.taskBusy === true
+      || snapshot.attachmentBusy === true;
   }
 
   function isAuthorityReplyAnsweringForButtons(snapshot = {}) {
@@ -385,6 +441,140 @@
     }
   }
 
+  function isStaleSendMessageOwnerByPageSnapshot(snapshot = {}, reason = '') {
+    const authority = (
+      snapshot.toolboxStatusAuthority
+      || snapshot.statusAuthority
+      || snapshot.topStatusAuthority
+      || snapshot.toolboxUnifiedAuthority
+      || {}
+    );
+    const replyState = String(
+      authority.replyState
+      || (authority.reply && authority.reply.state)
+      || snapshot.replyState
+      || '',
+    ).trim().toLowerCase();
+    const composerTextLen = Number(
+      authority.composerTextLen
+      || (authority.composer && authority.composer.textLen)
+      || snapshot.composerTextLen
+      || 0,
+    ) || 0;
+    const realSendButtonFound = !!(
+      authority.realSendButtonFound
+      || (authority.composer && authority.composer.hasRealSendButton)
+      || snapshot.realSendButtonFound
+    );
+    const responseState = String(
+      authority.responseState
+      || authority.responseStateRaw
+      || (authority.raw && authority.raw.responseState)
+      || snapshot.responseState
+      || '',
+    ).trim().toLowerCase();
+
+    return (
+      replyState === 'ready'
+      && composerTextLen === 0
+      && !realSendButtonFound
+      && responseState === 'idle'
+    );
+  }
+
+  function isRealSendMessageTaskRunning(sendMessageTask, snapshot = {}, reason = '') {
+    const sendPhase = sendMessageTask && sendMessageTask.phase
+      ? String(sendMessageTask.phase).trim().toLowerCase()
+      : '';
+
+    const isRealSendTaskRunning =
+      sendMessageTask
+      && sendMessageTask.running === true
+      && !['idle', 'done', 'failed', 'cancelled'].includes(sendPhase);
+
+    if (!isRealSendTaskRunning) {
+      return false;
+    }
+
+    if (isStaleSendMessageOwnerByPageSnapshot(snapshot, reason)) {
+      console.warn('[BUTTON_OWNER][IGNORE_STALE_SEND_MESSAGE]', {
+        reason,
+        sendPhase,
+        replyState: 'ready',
+        composerTextLen: 0,
+        realSendButtonFound: 0,
+        responseState: 'idle',
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  function logBatchOwnerPriorityUsed(owner, phase, source) {
+    const line = `[BUTTON_OWNER][BATCH_PRIORITY_USED] owner=batch-task-group phase=${phase || '-'} source=${source || '-'}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+    void owner;
+  }
+
+  function logBatchOwnerMismatch(actualOwner, source) {
+    const actual = actualOwner && typeof actualOwner === 'object'
+      ? String(actualOwner.action || actualOwner.owner || '-')
+      : String(actualOwner || '-');
+    const line = `[BUTTON_OWNER][BATCH_OWNER_MISMATCH] expected=batch-task-group actual=${actual} source=${source || '-'}`;
+    console.error(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function isRuntimeBatchTaskGroupRunning(runtimeState = {}) {
+    if (
+      runtimeState.batchTaskRunning === true
+      || runtimeState.batchTaskGroupRunning === true
+      || (runtimeState.batchTask && runtimeState.batchTask.running === true)
+      || (runtimeState.batchTask && runtimeState.batchTask.phase === 'running')
+    ) {
+      return true;
+    }
+    if (
+      typeof AutoQueueModule !== 'undefined'
+      && AutoQueueModule
+      && typeof AutoQueueModule.getState === 'function'
+    ) {
+      const autoState = AutoQueueModule.getState() || {};
+      return autoState.batchTaskRunning === true;
+    }
+    return false;
+  }
+
+  function buildBatchTaskGroupRunningOwner(runtimeState = {}) {
+    let phase = String(
+      runtimeState.batchTask && runtimeState.batchTask.phase
+        ? runtimeState.batchTask.phase
+        : runtimeState.phase || '',
+    ).trim().toLowerCase();
+    if (
+      !phase
+      && typeof AutoQueueModule !== 'undefined'
+      && AutoQueueModule
+      && typeof AutoQueueModule.getState === 'function'
+    ) {
+      const autoState = AutoQueueModule.getState() || {};
+      phase = String(autoState.phase || 'running').trim().toLowerCase();
+    }
+    return {
+      action: 'batch-task-group',
+      phase: phase || 'running',
+      source: 'batch-task-group',
+      buttonId: 'cgpt-autoq-start',
+      ownerButtonId: 'cgpt-autoq-start',
+    };
+  }
+
   function logButtonOwnerSuppress(action, owner, reason) {
     const line = `[BUTTON_OWNER][SUPPRESS] action=${action || '-'} owner=${owner || '-'} reason=${reason || '-'}`;
     console.log(line);
@@ -396,13 +586,28 @@
   const CLOSED_LOOP_LOCKED_TITLE = '当前闭环运行中，暂不可用';
 
   function getToolboxRunningOwnerFromRuntime(runtimeState = {}) {
-    if (runtimeState.runningOwner && typeof runtimeState.runningOwner === 'object') {
-      return runtimeState.runningOwner;
+    let resolvedOwner = null;
+    if (!isRuntimeBatchTaskGroupRunning(runtimeState)) {
+      if (runtimeState.runningOwner && typeof runtimeState.runningOwner === 'object') {
+        resolvedOwner = runtimeState.runningOwner;
+      } else if (typeof window !== 'undefined' && window.__cgptToolboxRunningOwner) {
+        resolvedOwner = window.__cgptToolboxRunningOwner;
+      }
     }
-    if (typeof window !== 'undefined' && window.__cgptToolboxRunningOwner) {
-      return window.__cgptToolboxRunningOwner;
+
+    if (isRuntimeBatchTaskGroupRunning(runtimeState)) {
+      const batchOwner = buildBatchTaskGroupRunningOwner(runtimeState);
+      if (
+        resolvedOwner
+        && String(resolvedOwner.action || resolvedOwner.owner || '').trim() !== 'batch-task-group'
+      ) {
+        logBatchOwnerMismatch(resolvedOwner, String(resolvedOwner.source || 'runtime-owner'));
+      }
+      logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, batchOwner.source);
+      return batchOwner;
     }
-    return null;
+
+    return resolvedOwner;
   }
 
   function getClosedLoopOwnerFromSnapshot(snapshot = {}) {
@@ -443,6 +648,12 @@
       || t === '闭环-快捷键模式+每轮上传'
       || t === '闭环-快捷键模式+每一轮上传'
       || t === '闭环-快捷键模式+每1轮上传'
+      || t === '环-快捷键+每轮上传'
+      || t === '环-快捷键+每一轮上传'
+      || t === '环-快捷键+每1轮上传'
+      || t === '闭环-快捷键+每轮上传'
+      || t === '闭环-快捷键+每一轮上传'
+      || t === '闭环-快捷键+每1轮上传'
       || t === '环-仅对话+每5轮上传';
   }
 
@@ -1078,12 +1289,28 @@
   }
 
   function resolveUnifiedButtonVisualState(buttonConfig = {}, runtimeState = {}) {
+    const startedAt = Date.now();
+    const kind = String(
+      buttonConfig.action || buttonConfig.id || buttonConfig.buttonId || 'unknown',
+    ).trim() || 'unknown';
     const action = String(buttonConfig.action || '').trim();
     const id = String(buttonConfig.id || buttonConfig.buttonId || '').trim();
     const text = String(buttonConfig.text || '').trim();
     const phase = String(runtimeState.phase || '').trim().toLowerCase();
     const buttonPhase = String(runtimeState.buttonPhase || '').trim().toLowerCase();
+    const snapshot = getButtonAuthoritySnapshot(
+      'upload-button-vm:resolveUnifiedButtonVisualState:' + kind,
+    );
+    const running = snapshot.closedLoopRunning === true
+      || snapshot.pendingSend === true
+      || snapshot.sendPhase === 'waiting_send';
+    const blocked = Boolean(snapshot.disabledReason);
     const runningOwner = getToolboxRunningOwnerFromRuntime(runtimeState);
+    const batchTaskGroupRunning = isRuntimeBatchTaskGroupRunning(runtimeState);
+    const batchTaskGroupIsOwner = !!(
+      runningOwner
+      && String(runningOwner.action || runningOwner.owner || '').trim() === 'batch-task-group'
+    );
     const closedLoopRunning = !!(runtimeState.closedLoopRunning);
     const isCurrentOwner = isRunningOwnerButton({ id, action }, runningOwner);
     const isStopAction = isStopLikeButtonView(
@@ -1093,20 +1320,43 @@
     const ownerId = runningOwner ? String(runningOwner.buttonId || '-').trim() : '-';
     const isClosedLoopButton = isClosedLoopActionName(action);
     const isClosedLoopOwner = isClosedLoopOwnerAction(action, runtimeState);
-
-    if (closedLoopRunning && isClosedLoopButton && !isClosedLoopOwner) {
-      return {
-        visual: 'disabled',
-        disabled: true,
-        reason: 'locked-by-closed-loop-running',
-        ownerId: runningOwner && runningOwner.buttonId
-          ? String(runningOwner.buttonId).trim()
-          : ownerId,
-      };
-    }
-
     const viewOwnerId = String(runtimeState.ownerButtonId || '').trim();
     const isViewOwner = !!(viewOwnerId && id && viewOwnerId === id);
+
+    if (
+      batchTaskGroupRunning
+      && batchTaskGroupIsOwner
+      && !isCurrentOwner
+      && (isStopAction || phase === 'running' || buttonPhase === 'running' || buttonPhase === 'waiting')
+    ) {
+      const idleLabel = resolveIdleBusinessTextForAction(action, runtimeState);
+      logButtonOwnerSuppress(action, 'batch-task-group', 'batch-owner-non-owner-no-red');
+      return {
+        kind,
+        enabled: false,
+        disabled: true,
+        running: false,
+        blocked: true,
+        colorRole: 'blocked',
+        visual: 'disabled',
+        disabledReason: 'locked-by-batch-task-group-running',
+        reason: 'locked-by-batch-task-group-running',
+        sendPhase: snapshot.sendPhase || 'unknown',
+        replyBusy: snapshot.replyBusy === true,
+        taskBusy: snapshot.taskBusy === true,
+        attachmentBusy: snapshot.attachmentBusy === true,
+        closedLoopRunning: snapshot.closedLoopRunning === true,
+        pendingSend: snapshot.pendingSend === true,
+        realSendReady: snapshot.realSendReady === true,
+        sendable: snapshot.sendable === true,
+        inputable: snapshot.inputable === true,
+        label: idleLabel,
+        source: 'upload-button-vm:resolveUnifiedButtonVisualState',
+        authoritySource: snapshot.source || '',
+        ownerId: 'cgpt-autoq-start',
+        ts: Date.now(),
+      };
+    }
 
     const shouldBeRedStop = isStopAction
       && (!isClosedLoopStopLikeText(text) || shouldShowClosedLoopStopView(action, { id, action }, runtimeState))
@@ -1126,47 +1376,180 @@
       );
 
     if (shouldBeRedStop) {
-      return {
-        visual: 'danger',
+      const stopView = {
+        kind,
+        enabled: true,
         disabled: false,
+        running: true,
+        blocked: false,
+        colorRole: 'running',
+        visual: 'danger',
+        disabledReason: '',
         reason: 'current-task-stop-button',
+        sendPhase: snapshot.sendPhase || 'unknown',
+        replyBusy: snapshot.replyBusy === true,
+        taskBusy: snapshot.taskBusy === true,
+        attachmentBusy: snapshot.attachmentBusy === true,
+        closedLoopRunning: snapshot.closedLoopRunning === true,
+        pendingSend: snapshot.pendingSend === true,
+        realSendReady: snapshot.realSendReady === true,
+        sendable: snapshot.sendable === true,
+        inputable: snapshot.inputable === true,
+        label: text,
+        source: 'upload-button-vm:resolveUnifiedButtonVisualState',
+        authoritySource: snapshot.source || '',
         ownerId,
+        ts: Date.now(),
       };
+      console.log('[UPLOAD_BUTTON_VM][VISUAL_STATE_RESOLVED]', {
+        kind,
+        enabled: stopView.enabled,
+        running: stopView.running,
+        blocked: stopView.blocked,
+        colorRole: stopView.colorRole,
+        visual: stopView.visual,
+        disabledReason: stopView.disabledReason,
+        sendPhase: stopView.sendPhase,
+        costMs: Date.now() - startedAt,
+      });
+      return stopView;
+    }
+
+    if (closedLoopRunning && isClosedLoopButton && !isClosedLoopOwner) {
+      const lockedView = {
+        kind,
+        enabled: false,
+        disabled: true,
+        running,
+        blocked: true,
+        colorRole: 'blocked',
+        visual: 'disabled',
+        disabledReason: snapshot.disabledReason || 'locked-by-closed-loop-running',
+        reason: 'locked-by-closed-loop-running',
+        sendPhase: snapshot.sendPhase || 'unknown',
+        replyBusy: snapshot.replyBusy === true,
+        taskBusy: snapshot.taskBusy === true,
+        attachmentBusy: snapshot.attachmentBusy === true,
+        closedLoopRunning: true,
+        pendingSend: snapshot.pendingSend === true,
+        realSendReady: snapshot.realSendReady === true,
+        sendable: snapshot.sendable === true,
+        inputable: snapshot.inputable === true,
+        label: text,
+        source: 'upload-button-vm:resolveUnifiedButtonVisualState',
+        authoritySource: snapshot.source || '',
+        ownerId: runningOwner && runningOwner.buttonId
+          ? String(runningOwner.buttonId).trim()
+          : ownerId,
+        ts: Date.now(),
+      };
+      console.log('[UPLOAD_BUTTON_VM][VISUAL_STATE_RESOLVED]', {
+        kind,
+        enabled: lockedView.enabled,
+        running: lockedView.running,
+        blocked: lockedView.blocked,
+        colorRole: lockedView.colorRole,
+        visual: lockedView.visual,
+        reason: lockedView.reason,
+        costMs: Date.now() - startedAt,
+      });
+      return lockedView;
     }
 
     if (closedLoopRunning && !isCurrentOwner) {
-      return {
-        visual: 'disabled',
+      const lockedView = {
+        kind,
+        enabled: false,
         disabled: true,
+        running,
+        blocked: true,
+        colorRole: 'blocked',
+        visual: 'disabled',
+        disabledReason: snapshot.disabledReason || 'locked-by-closed-loop-running',
         reason: 'locked-by-closed-loop-running',
+        sendPhase: snapshot.sendPhase || 'unknown',
+        replyBusy: snapshot.replyBusy === true,
+        taskBusy: snapshot.taskBusy === true,
+        attachmentBusy: snapshot.attachmentBusy === true,
+        closedLoopRunning: true,
+        pendingSend: snapshot.pendingSend === true,
+        realSendReady: snapshot.realSendReady === true,
+        sendable: snapshot.sendable === true,
+        inputable: snapshot.inputable === true,
+        label: text,
+        source: 'upload-button-vm:resolveUnifiedButtonVisualState',
+        authoritySource: snapshot.source || '',
         ownerId,
+        ts: Date.now(),
       };
+      console.log('[UPLOAD_BUTTON_VM][VISUAL_STATE_RESOLVED]', {
+        kind,
+        enabled: lockedView.enabled,
+        running: lockedView.running,
+        blocked: lockedView.blocked,
+        reason: lockedView.reason,
+        costMs: Date.now() - startedAt,
+      });
+      return lockedView;
     }
 
-    if (phase === 'disabled' || buttonPhase === 'disabled') {
-      return {
-        visual: 'disabled',
-        disabled: true,
-        reason: 'phase-disabled',
-        ownerId,
-      };
+    let colorRole = snapshot.buttonColorRole || 'normal';
+    if (running) {
+      colorRole = 'running';
+    }
+    if (blocked) {
+      colorRole = 'blocked';
     }
 
-    if (runtimeState.viewDisabled === true) {
-      return {
-        visual: 'disabled',
-        disabled: true,
-        reason: 'view-disabled',
-        ownerId,
-      };
-    }
-
-    return {
-      visual: 'normal',
-      disabled: false,
-      reason: 'normal',
+    const phaseDisabled = phase === 'disabled' || buttonPhase === 'disabled' || runtimeState.viewDisabled === true;
+    const canClick = !blocked && !phaseDisabled;
+    const view = {
+      kind,
+      enabled: canClick,
+      disabled: !canClick,
+      running,
+      blocked: blocked || phaseDisabled,
+      colorRole,
+      visual: (blocked || phaseDisabled) ? 'disabled' : (running ? 'running' : 'normal'),
+      disabledReason: phaseDisabled
+        ? (runtimeState.viewDisabled ? 'view-disabled' : 'phase-disabled')
+        : (snapshot.disabledReason || ''),
+      reason: phaseDisabled
+        ? (runtimeState.viewDisabled ? 'view-disabled' : 'phase-disabled')
+        : (snapshot.disabledReason || 'normal'),
+      sendPhase: snapshot.sendPhase || 'unknown',
+      replyBusy: snapshot.replyBusy === true,
+      taskBusy: snapshot.taskBusy === true,
+      attachmentBusy: snapshot.attachmentBusy === true,
+      closedLoopRunning: snapshot.closedLoopRunning === true,
+      pendingSend: snapshot.pendingSend === true,
+      realSendReady: snapshot.realSendReady === true,
+      sendable: snapshot.sendable === true,
+      inputable: snapshot.inputable === true,
+      label: text,
+      source: 'upload-button-vm:resolveUnifiedButtonVisualState',
+      authoritySource: snapshot.source || '',
       ownerId,
+      ts: Date.now(),
     };
+    console.log('[UPLOAD_BUTTON_VM][VISUAL_STATE_RESOLVED]', {
+      kind,
+      enabled: view.enabled,
+      running: view.running,
+      blocked: view.blocked,
+      colorRole: view.colorRole,
+      visual: view.visual,
+      disabledReason: view.disabledReason,
+      sendPhase: view.sendPhase,
+      replyBusy: view.replyBusy,
+      taskBusy: view.taskBusy,
+      attachmentBusy: view.attachmentBusy,
+      closedLoopRunning: view.closedLoopRunning,
+      pendingSend: view.pendingSend,
+      realSendReady: view.realSendReady,
+      costMs: Date.now() - startedAt,
+    });
+    return view;
   }
 
   function logButtonColorStopOwner(button, buttonConfig = {}, runtimeState = {}, unified = {}) {
@@ -1445,6 +1828,7 @@
     const phase = normalizeTaskPhase(rawPhase);
     return !!(
       autoState.running
+      || autoState.batchTaskRunning
       || autoState.waitingReply
       || autoState.cancelling
       || autoState.stopRequested
@@ -1465,6 +1849,9 @@
   function resolveAutoQueueOwnerAction(autoState = {}) {
     if (!isAutoQueueActiveForUploadButton(autoState)) {
       return '';
+    }
+    if (autoState.batchTaskRunning === true) {
+      return 'batch-task-group';
     }
     return autoState.continueUntilDoneStrict === true
       ? 'auto-continue-until-done'
@@ -1595,7 +1982,19 @@
 
   function resolveWaitingReplyOwner(snapshot = {}, capability = {}) {
     void capability;
-    const closedLoopOwner = resolveClosedLoopOwnerAction(snapshot);
+    if (isRuntimeBatchTaskGroupRunning(snapshot)) {
+      const batchOwner = buildBatchTaskGroupRunningOwner(snapshot);
+      logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, 'batch-task-group');
+      return 'batch-task-group';
+    }
+
+    const closedLoopRunning = snapshot.closedLoopContinueRunning === true
+      || (
+        typeof window !== 'undefined'
+        && window.__cgptClosedLoopState
+        && window.__cgptClosedLoopState.running === true
+      );
+    const closedLoopOwner = closedLoopRunning ? resolveClosedLoopOwnerAction(snapshot) : '';
     if (closedLoopOwner) {
       logButtonOwnerResolve(closedLoopOwner, 'running', 'closed-loop');
       return closedLoopOwner;
@@ -1645,7 +2044,7 @@
       : {};
     const sendMessageAction = String(sendMessageTask.action || sendMessageTask.plan?.mode || '').trim();
     if (
-      sendMessageTask.running === true
+      isRealSendMessageTaskRunning(sendMessageTask, snapshot, 'resolveWaitingReplyOwner:send-copy-hotkey')
       && (sendMessageAction === 'send-copy-hotkey' || sendMessageAction === 'send-copy-hotkey-continue')
     ) {
       logButtonOwnerResolve(sendMessageAction, sendMessageTask.phase || 'running', 'send-message-task');
@@ -1653,15 +2052,45 @@
     }
 
     const sendPhase = getNormalizedSendTaskPhase(snapshot);
+    const realSendRunning = sendMessageTask.running === true
+      && !['idle', 'done', 'failed', 'cancelled', 'disabled'].includes(sendPhase);
     // waiting_reply: 已发送，等待 ChatGPT 回复
     // waiting_page_reply_to_send: 页面正在回复，消息尚未真正发送，等待页面空闲后再发
     if (
-      sendPhase === TaskPhase.WAITING_REPLY
-      || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
-      || isLegacySendPending(snapshot)
+      realSendRunning
+      && (
+        sendPhase === TaskPhase.WAITING_REPLY
+        || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
+        || isLegacySendPending(snapshot)
+      )
     ) {
       logButtonOwnerResolve('send-message', sendPhase, 'manual-send');
       return 'send-message';
+    }
+
+    if (
+      !realSendRunning
+      && !closedLoopRunning
+      && (
+        sendPhase === TaskPhase.IDLE
+        || !sendPhase
+        || sendPhase === 'idle'
+      )
+    ) {
+      const staleOwner = String(
+        snapshot.owner
+        || snapshot.taskOwner
+        || '',
+      ).trim();
+      if (staleOwner === 'send-message') {
+        console.warn('[BUTTON_OWNER][CLEAR_STALE_SEND_OWNER]', {
+          reason: 'resolveWaitingReplyOwner',
+          oldOwner: staleOwner,
+          sendPhase,
+          sendRunning: sendMessageTask.running ? 1 : 0,
+          closedLoopRunning: closedLoopRunning ? 1 : 0,
+        });
+      }
     }
 
     const loopTask = snapshot.copyHotkeyContinueLoopTask && typeof snapshot.copyHotkeyContinueLoopTask === 'object'
@@ -2678,7 +3107,7 @@
         ownerButtonId: SEND_MESSAGE_OWNER_BUTTON_ID,
       });
     }
-    if (sendMessageTask && sendMessageTask.running && !isSendFamilyOwner(snapshot, 'send-message')) {
+    if (sendMessageTask && isRealSendMessageTaskRunning(sendMessageTask, snapshot, 'getSendMessageButtonViewState:foreign-owner') && !isSendFamilyOwner(snapshot, 'send-message')) {
       const switchable = canSwitchSendFamilyAction(snapshot, 'send-message');
       return finish({
         phase: TaskPhase.IDLE,
@@ -3685,7 +4114,7 @@
     const thisButtonId = 'cgpt-send-copy-hotkey-once';
     const currentAction = String(sendMessageTask.action || sendMessageTask.plan?.mode || '').trim();
     const currentOwner = String(sendMessageTask.ownerButtonId || '').trim();
-    const sendRunning = sendMessageTask.running === true;
+    const sendRunning = isRealSendMessageTaskRunning(sendMessageTask, snapshot, 'getSendCopyHotkeyButtonViewState');
     const rawPhase = String(task.phase || TaskPhase.IDLE).trim().toLowerCase();
     const activePhases = new Set([
       'preparing',
@@ -5578,7 +6007,15 @@
     let snapshot = applyOptions.snapshot && typeof applyOptions.snapshot === 'object'
       ? applyOptions.snapshot
       : {};
-    if (!String(snapshot.waitingReplyOwner || '').trim()) {
+    if (isRuntimeBatchTaskGroupRunning(snapshot)) {
+      snapshot = {
+        ...snapshot,
+        batchTaskRunning: true,
+        batchTaskOwner: 'batch-task-group',
+        waitingReplyOwner: 'batch-task-group',
+        runningOwner: buildBatchTaskGroupRunningOwner(snapshot),
+      };
+    } else if (!String(snapshot.waitingReplyOwner || '').trim()) {
       snapshot = {
         ...snapshot,
         waitingReplyOwner: resolveWaitingReplyOwner(snapshot, snapshot.capability),
@@ -5921,6 +6358,29 @@
     syncUploadButtonIndicatorClasses(button, resolvedView);
 
     const changed = ButtonState.setToolboxButtonState(button, options);
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLogIfChanged === 'function') {
+      ToolboxShell.appendLogIfChanged(
+        `BUTTON_VIEW_RENDER_SOURCE:${button.id || '-'}`,
+        [
+          button.id || '-',
+          canonicalAction || action || '-',
+          resolvedView.phase || '-',
+          resolvedView.buttonPhase || '-',
+          reason || '-',
+        ].join('|'),
+        [
+          '[BUTTON_VIEW][SOURCE]',
+          `id=${button.id || '-'}`,
+          `action=${canonicalAction || action || '-'}`,
+          `phase=${resolvedView.phase || '-'}`,
+          `buttonPhase=${resolvedView.buttonPhase || '-'}`,
+          `taskKey=${resolvedView.taskKey || '-'}`,
+          `reason=${reason || '-'}`,
+          'source=snapshot-vm-buttonstate',
+        ].join(' '),
+        1200,
+      );
+    }
 
     applyButtonDisabledVisualOnlyState(button, resolvedView, canonicalAction || action);
 

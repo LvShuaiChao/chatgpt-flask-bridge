@@ -4344,8 +4344,8 @@ const AutoQueueModule = (() => {
             闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
           </div>
           <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键模式+每1轮上传</button>
-            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键模式+每5轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每1轮上传</button>
+            <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每5轮上传</button>
             <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-仅对话+每5轮上传</button>
           </div>
           <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>
@@ -5448,6 +5448,72 @@ const AutoQueueModule = (() => {
         return null;
       }
       return authority.reply.state === 'answering' || authority.composer.hasRealStopButton === true;
+    }
+
+    function isBatchTaskWaitReplyPhaseActive() {
+      const phase = String(state.phase || '').trim().toLowerCase();
+      return !!(
+        state.batchTaskRunning === true
+        && state.waitingReply === true
+        && (
+          phase === AUTO_QUEUE_PHASES.WAITING_REPLY
+          || phase === 'waiting_reply'
+        )
+      );
+    }
+
+    function isBatchWaitReplyPageStillAnswering(source = '-') {
+      if (!isBatchTaskWaitReplyPhaseActive()) {
+        return false;
+      }
+      const authorityAnswering = isToolboxReplyAnsweringForAutoQueue(`batch-wait-reply:${source}`);
+      if (authorityAnswering === true) {
+        return true;
+      }
+      if (authorityAnswering === false) {
+        const bridgeBusy = Boolean(
+          typeof BridgeState !== 'undefined'
+          && BridgeState
+          && (
+            BridgeState.response_state === 'generating'
+            || BridgeState.response_state === 'streaming'
+          )
+        );
+        return bridgeBusy;
+      }
+      const stopButton = typeof hasRealChatGPTStopGeneratingButton === 'function'
+        && hasRealChatGPTStopGeneratingButton();
+      return !!stopButton;
+    }
+
+    function formatBatchTaskGroupSourceTag(rawSource) {
+      const src = String(rawSource || '').trim();
+      if (!state.batchTaskRunning) {
+        return src;
+      }
+      if (!src) {
+        return 'batch-task-group';
+      }
+      if (src.startsWith('batch-task-group:')) {
+        return src;
+      }
+      return `batch-task-group:${src}`;
+    }
+
+    function logBatchWaitReplyContinueThrottled(source = '-') {
+      const run = state.taskRun || {};
+      const authority = getToolboxUnifiedAuthorityForAutoQueue(`wait-reply-continue:${source}`);
+      const authorityState = authority && authority.reply
+        ? String(authority.reply.state || '-')
+        : '-';
+      const hasStop = authority && authority.composer && authority.composer.hasRealStopButton ? 1 : 0;
+      appendAutoQueuePollLogThrottled(
+        'batch-wait-reply-continue',
+        '[BATCH_TASK_GROUP][WAIT_REPLY_CONTINUE] '
+        + `taskIndex=${Math.max(0, Number(run.currentIndex || 0))} `
+        + `phase=${String(state.phase || '-')} `
+        + `authorityState=${authorityState} hasStop=${hasStop} source=${source || '-'}`,
+      );
     }
 
     function isToolboxReplyReadyForAutoQueue(reason = '-') {
@@ -9956,7 +10022,9 @@ const AutoQueueModule = (() => {
       const task = options.task || getCurrentRunningTask();
       const kind = String(options.kind || 'continue');
       const promptText = String(options.promptText || '');
-      const source = String(options.source || `autoq-batch-${kind}`);
+      const source = formatBatchTaskGroupSourceTag(
+        String(options.source || `autoq-batch-${kind}`),
+      );
 
       const attachmentEvidence = getAutoQueueComposerAttachmentEvidence
         ? getAutoQueueComposerAttachmentEvidence(`batch-send-${kind}`)
@@ -10014,28 +10082,102 @@ const AutoQueueModule = (() => {
       return result;
     }
 
+    function buildBatchAlignHotkeyGuardKey(task, round, replyText) {
+      const taskId = String(
+        task && (task.id || task.taskId || task.title || task.name)
+          ? (task.id || task.taskId || task.title || task.name)
+          : '-',
+      );
+
+      const text = String(replyText || '');
+      let hash = 0;
+      for (let i = 0; i < text.length; i += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+      }
+
+      return `${taskId}:${round}:${text.length}:${hash}`;
+    }
+
     async function runBatchAlignCopyHotkeyAfterReplyStable(task, replyText, resolved, profile) {
       const round = Number(task.continueCount || 0) + 1;
       const actualDoneSignal = typeof normalizeDoneSignal === 'function'
         ? normalizeDoneSignal(resolved.actualDoneSignal)
         : resolved.actualDoneSignal;
 
+      const guardKey = buildBatchAlignHotkeyGuardKey(task, round, replyText);
+      if (!state.taskRun) {
+        state.taskRun = {};
+      }
+      const oldGuard = state.taskRun.alignHotkeyGuard || null;
+
+      if (oldGuard && oldGuard.key === guardKey && oldGuard.status === 'running') {
+        ToolboxShell.appendLog(
+          `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_SKIP_DUP_RUNNING] taskId=${task && (task.id || task.taskId || task.title || task.name) || '-'} `
+          + `round=${round} guardKey=${guardKey} startedAt=${oldGuard.startedAt || 0}`,
+        );
+        return {
+          ok: true,
+          reason: 'align-hotkey-already-running',
+          scheduled: true,
+        };
+      }
+
+      if (oldGuard && oldGuard.key === guardKey && oldGuard.status === 'done') {
+        ToolboxShell.appendLog(
+          `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_SKIP_DUP_DONE] taskId=${task && (task.id || task.taskId || task.title || task.name) || '-'} `
+          + `round=${round} guardKey=${guardKey} doneAt=${oldGuard.doneAt || 0}`,
+        );
+        return {
+          ok: true,
+          reason: 'align-hotkey-already-done',
+          scheduled: true,
+        };
+      }
+
+      if (oldGuard && oldGuard.key === guardKey && oldGuard.status === 'failed') {
+        const failReason = oldGuard.reason || 'batch-align-hotkey-failed';
+        ToolboxShell.appendLog(
+          `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_SKIP_DUP_FAILED] taskId=${task && (task.id || task.taskId || task.title || task.name) || '-'} `
+          + `round=${round} guardKey=${guardKey} reason=${failReason} failedAt=${oldGuard.failedAt || 0}`,
+        );
+        failCurrentTask(failReason);
+        return {
+          ok: false,
+          reason: failReason,
+        };
+      }
+
+      state.taskRun.alignHotkeyGuard = {
+        key: guardKey,
+        status: 'running',
+        round,
+        startedAt: Date.now(),
+      };
+
       setTaskBatchStep('copy-last-reply', task, { log: false });
       ToolboxShell.appendLog(
-        `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_START] task=${task.title || '-'} round=${round}`,
+        `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_GUARD_START] task=${task.title || '-'} round=${round} guardKey=${guardKey}`,
       );
 
       if (
         typeof UploadModule === 'undefined'
         || typeof UploadModule.runCopyHotkeyOnceCore !== 'function'
       ) {
-        failCurrentTask('upload-module-copy-hotkey-missing');
-        return { ok: false, reason: 'upload-module-copy-hotkey-missing' };
+        const failReason = 'upload-module-copy-hotkey-missing';
+        state.taskRun.alignHotkeyGuard = {
+          key: guardKey,
+          status: 'failed',
+          round,
+          reason: failReason,
+          failedAt: Date.now(),
+        };
+        failCurrentTask(failReason);
+        return { ok: false, reason: failReason };
       }
 
       const copyResult = await UploadModule.runCopyHotkeyOnceCore({
         source: `autoq-batch-align-copy-${task.id || round}-${round}`,
-        skipActionLock: true,
+        skipActionLock: false,
         waitForCurrentReply: false,
         shouldStop: () => !state.running || (state.batchTask && state.batchTask.stopRequested === true),
       });
@@ -10047,14 +10189,40 @@ const AutoQueueModule = (() => {
       if (!copyResult || copyResult.ok !== true) {
         const failReason = copyResult && copyResult.reason
           ? String(copyResult.reason)
-          : 'copy-hotkey-failed';
+          : 'batch-align-copy-hotkey-failed';
+
+        if (copyResult && copyResult.copied === true && copyResult.hotkeySent === false) {
+          ToolboxShell.appendLog(
+            `[AUTOQ][BATCH_ALIGN][HOTKEY_TERMINAL_FAIL] task=${task.title || '-'} round=${round} guardKey=${guardKey} reason=${failReason}`,
+          );
+        }
+
+        state.taskRun.alignHotkeyGuard = {
+          key: guardKey,
+          status: 'failed',
+          round,
+          reason: failReason,
+          failedAt: Date.now(),
+        };
+
+        ToolboxShell.appendLog(
+          `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_GUARD_FAILED] task=${task.title || '-'} round=${round} guardKey=${guardKey} reason=${failReason}`,
+        );
+
         failCurrentTask(failReason);
         return { ok: false, reason: failReason };
       }
 
+      state.taskRun.alignHotkeyGuard = {
+        key: guardKey,
+        status: 'done',
+        round,
+        doneAt: Date.now(),
+      };
+
       const copiedChars = String(copyResult.copied_text || replyText || '').length;
       ToolboxShell.appendLog(
-        `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_DONE] task=${task.title || '-'} chars=${copiedChars} hotkeySent=${copyResult.hotkeySent === false ? 0 : 1}`,
+        `[AUTOQ][BATCH_ALIGN][COPY_HOTKEY_GUARD_DONE] task=${task.title || '-'} round=${round} guardKey=${guardKey} chars=${copiedChars} hotkeySent=${copyResult.hotkeySent === false ? 0 : 1}`,
       );
 
       const delayMs = getBatchAlignPostHotkeyDelayMs('batch-align-post-hotkey');
@@ -11744,7 +11912,9 @@ const AutoQueueModule = (() => {
       const task = options.task || getCurrentRunningTask();
       const taskTitle = options.taskTitle || (task && task.title ? task.title : '-');
       const prompt = String(options.prompt || '').trim();
-      const source = String(options.source || `autoq-task-${safeSendKind}`);
+      const source = formatBatchTaskGroupSourceTag(
+        String(options.source || `autoq-task-${safeSendKind}`),
+      );
       const logTag = String(options.logTag || '[AUTOQ][ENTER_WAITING_REPLY]');
       const run = state.taskRun || {};
 
@@ -11948,24 +12118,55 @@ const AutoQueueModule = (() => {
         };
       }
       const snap = state.batchReplyStableSnapshot;
+      const pageStillAnswering = !text && isBatchWaitReplyPageStillAnswering(source);
+      if (pageStillAnswering) {
+        logBatchWaitReplyContinueThrottled(source);
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][EMPTY_ASSISTANT_BUT_ANSWERING] action=continue-wait source=${source || '-'}`,
+        );
+        state.batchReplyStableSnapshot = snap;
+        return {
+          text: '',
+          stableMs: 0,
+          count: 0,
+          waitingBecauseAnswering: true,
+        };
+      }
       if (text && text === snap.text) {
         snap.lastSeenAt = now;
         snap.count += 1;
-      } else {
+      } else if (text) {
         snap.text = text;
-        snap.firstSeenAt = text ? now : 0;
-        snap.lastSeenAt = text ? now : 0;
-        snap.count = text ? 1 : 0;
+        snap.firstSeenAt = now;
+        snap.lastSeenAt = now;
+        snap.count = 1;
+      } else {
+        snap.text = '';
+        snap.firstSeenAt = 0;
+        snap.lastSeenAt = 0;
+        snap.count = 0;
       }
       state.batchReplyStableSnapshot = snap;
       return {
         text,
         stableMs: text ? now - Number(snap.firstSeenAt || now) : 0,
         count: snap.count,
+        waitingBecauseAnswering: false,
       };
     }
 
     function isBatchAssistantActuallyIdleForSettle(source, replySnapshot) {
+      if (replySnapshot && replySnapshot.waitingBecauseAnswering === true) {
+        return {
+          idle: false,
+          assistantBusy: true,
+          stopButton: true,
+          uploading: false,
+          stableMs: 0,
+          stableCount: 0,
+          replyChars: 0,
+        };
+      }
       const assistantBusy = typeof isAssistantBusy === 'function'
         ? !!isAssistantBusy()
         : isChatGPTActuallyBusyForTaskQueue();
@@ -12004,6 +12205,13 @@ const AutoQueueModule = (() => {
 
     async function maybeRepairStaleBatchWaitingReply(source) {
       if (state.batchWaitingReplyRepairRunning) {
+        return false;
+      }
+      const authorityBusy = shouldBlockWatchdogRecoverBecauseAssistantBusy(`batch-wait-reply-repair:${source || '-'}`);
+      if (authorityBusy) {
+        ToolboxShell.appendLog(
+          `[BATCH_TASK_GROUP][WAIT_REPLY_REPAIR_SKIP_AUTHORITY_BUSY] source=${source || '-'} action=continue-wait`,
+        );
         return false;
       }
       if (shouldPauseWaitingReplyForInvalidPageContext(`stale-waiting-reply:${source || '-'}`)) {
@@ -15560,6 +15768,19 @@ const AutoQueueModule = (() => {
         return snapshot;
       }
 
+      if (snapshot && snapshot.continueWait === true) {
+        return {
+          ok: false,
+          continueWait: true,
+          reason: snapshot.reason || 'continue-wait-no-assistant-after-latest-user',
+          text: '',
+          turnId: '',
+          turnNo: -1,
+          index: -1,
+          textHash: '',
+        };
+      }
+
       return {
         ok: false,
         reason: snapshot && snapshot.reason ? snapshot.reason : 'assistant-snapshot-not-found',
@@ -15583,6 +15804,9 @@ const AutoQueueModule = (() => {
       }
 
       if (!snapshot || !snapshot.ok) {
+        if (snapshot && snapshot.continueWait === true) {
+          return false;
+        }
         ToolboxShell.appendLog(
           `[TASK_VERIFY][TURN_BIND_FAIL] reason=no-assistant-snapshot source=${source}`,
         );
@@ -27759,7 +27983,11 @@ const AutoQueueModule = (() => {
         failCurrentTask(errText);
       } finally {
         markTaskBatchStepRunning(false);
-        state.taskRun.pendingSendKind = null;
+
+        if (state.taskRun && state.taskRun.pendingSendKind === 'processing') {
+          state.taskRun.pendingSendKind = null;
+        }
+
         updateStatus('task-reply-ready');
       }
     }
@@ -35053,12 +35281,34 @@ const AutoQueueModule = (() => {
       });
 
       if (!picked || !picked.ok || !picked.record) {
+        const pickedReason = picked && picked.reason ? String(picked.reason) : 'no-current-assistant';
+        const isNoAssistantAfterUser = pickedReason === 'no-assistant-after-latest-user'
+          || pickedReason === 'no-current-assistant';
+        if (isBatchWaitReplyPageStillAnswering(reason) && isNoAssistantAfterUser) {
+          const authorityAnswering = isToolboxReplyAnsweringForAutoQueue(`boundary:${reason}`);
+          logBatchWaitReplyContinueThrottled(reason);
+          ToolboxShell.appendLog(
+            '[BATCH_TASK_GROUP][WAIT_REPLY_NO_ASSISTANT_CONTINUE] '
+            + `reason=${pickedReason} authorityAnswering=${authorityAnswering === true ? 1 : 0} `
+            + `source=${reason}`,
+          );
+          return {
+            ok: false,
+            reason: 'continue-wait-no-assistant-after-latest-user',
+            continueWait: true,
+            text: '',
+            turnId: '',
+            turnNo: -1,
+            index: -1,
+            textHash: '',
+          };
+        }
         ToolboxShell.appendLog(
-          `[TASK_BOUNDARY][SNAPSHOT_FAIL] reason=${reason} detail=${picked && picked.reason ? picked.reason : 'no-current-assistant'}`,
+          `[TASK_BOUNDARY][SNAPSHOT_FAIL] reason=${reason} detail=${pickedReason}`,
         );
         return {
           ok: false,
-          reason: picked && picked.reason ? picked.reason : 'no-current-assistant',
+          reason: pickedReason,
           text: '',
           turnId: '',
           turnNo: -1,
@@ -36315,7 +36565,7 @@ const AutoQueueModule = (() => {
       const task = getCurrentRunningTask();
       const taskTitle = task && task.title ? task.title : '-';
       const taskIndex = Math.max(0, Number(run.currentIndex || 0));
-      const source = `autoq-task-${safeSendKind}-${taskIndex + 1}`;
+      const source = formatBatchTaskGroupSourceTag(`autoq-task-${safeSendKind}-${taskIndex + 1}`);
 
       if (
         typeof UploadModule === 'undefined'
@@ -40080,8 +40330,8 @@ const AutoQueueModule = (() => {
               闭环按钮统一复用上传模块的闭环执行链路；这里是闭环控制的主入口，首页不再单独维护一份闭环按钮逻辑。
             </div>
             <div class="cgpt-row cgpt-autoq-closed-loop-actions" id="cgpt-autoq-closed-loop-actions">
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键模式+每1轮上传</button>
-              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键模式+每5轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every-round" id="cgpt-autoq-closed-loop-upload-every-round-hotkey-btn" data-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round" data-cgpt-button-group="closed-loop" data-closed-loop-mode="with_hotkey_every_round" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每1轮上传</button>
+              <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-hotkey-every5" id="cgpt-autoq-closed-loop-upload-every5-hotkey-btn" data-action="closed-loop-with-hotkey" data-cgpt-base-action="closed-loop-with-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-快捷键+每5轮上传</button>
               <button type="button" class="cgpt-btn cyan cgpt-btn-closed-loop cgpt-btn-closed-loop-idle cgpt-closed-loop-mode-direct-every5" id="cgpt-autoq-closed-loop-upload-every5-btn" data-action="closed-loop-without-hotkey" data-cgpt-base-action="closed-loop-without-hotkey" data-cgpt-button-group="closed-loop" data-closed-loop-mode="without_hotkey" data-closed-loop-mirror="1" data-dynamic-label-allowed="1">闭环-仅对话+每5轮上传</button>
             </div>
             <div class="cgpt-section-title" style="margin-top: 12px;">闭环等待设置</div>

@@ -712,19 +712,13 @@
         return true;
       }
 
-      if (typeof document !== 'undefined') {
-        const stopSelectors = [
-          'button[data-testid="stop-button"]',
-          'button[aria-label*="停止"]',
-          'button[aria-label*="Stop"]',
-          'button[aria-label*="stop"]',
-        ];
-        for (const selector of stopSelectors) {
-          const btn = document.querySelector(selector);
-          if (btn instanceof HTMLButtonElement && !btn.disabled && isNativeStopButtonElement(btn)) {
-            return true;
-          }
-        }
+      const stopBtn = findSendButton({
+        reason: 'assistant-generating:stop-button-probe',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
+      if (stopBtn instanceof HTMLButtonElement && !stopBtn.disabled && isNativeStopButtonElement(stopBtn)) {
+        return true;
       }
 
       return false;
@@ -1038,23 +1032,16 @@
           reason: 'document-unavailable',
         };
       }
-      const candidates = Array.from(document.querySelectorAll([
-        '[data-testid="stop-button"]',
-        'button[aria-label*="停止回答"]',
-        'button[aria-label*="停止"]',
-        'button[aria-label*="Stop"]',
-        'button[aria-label*="stop"]',
-      ].join(',')));
-      const btn = candidates.find((item) => {
-        if (!(item instanceof HTMLElement)) {
-          return false;
-        }
-        const rect = item.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+      invalidateRealSendButtonCache('before-stop-click');
+      const btn = findSendButton({
+        reason: 'stop-click:user-click',
+        force: true,
+        silent: false,
+        cacheTtlMs: 0,
       });
       if (!btn) {
         ToolboxShell.appendLog(
-          `[SEND_TASK][STOP_BUTTON_NOT_FOUND] source=${source || '-'}`,
+          `[SEND_TASK][STOP_BUTTON_MISSING] reason=stop-click source=${source || '-'}`,
         );
         return {
           ok: false,
@@ -1065,15 +1052,17 @@
         btn.click();
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
+        const errStack = err && err.stack ? String(err.stack).slice(0, 1200) : '';
         console.error('[ChatGPT toolbox] clickChatGptStopButtonForSendTask failed', err);
         ToolboxShell.appendLog(
-          `[SEND_TASK][STOP_BUTTON_CLICK_FAILED] source=${source || '-'} error=${errText}`,
+          `[SEND_TASK][STOP_BUTTON_CLICK_FAILED] source=${source || '-'} error=${errText} stack=${errStack}`,
         );
         return {
           ok: false,
           reason: 'stop-button-click-failed',
         };
       }
+      invalidateRealSendButtonCache('after-stop-click');
       ToolboxShell.appendLog(
         `[SEND_TASK][STOP_BUTTON_CLICKED] source=${source || '-'}`,
       );
@@ -1612,6 +1601,335 @@
     let toolboxWorkerRuntime = null;
     let toolboxWorkerRequestId = 1;
     const toolboxWorkerPendingTasks = new Map();
+    const REAL_SEND_BUTTON_CACHE_TTL_MS = 300;
+    const REAL_SEND_BUTTON_CACHE_HIT_LOG_INTERVAL_MS = 2000;
+    let realSendButtonCache = null;
+    let realSendButtonCacheAt = 0;
+    let realSendButtonCacheSignature = '';
+    let realSendButtonCacheHitLogAt = 0;
+
+    function normalizeFindRealSendButtonOptions(reasonOrOptions = '-') {
+      if (reasonOrOptions === true) {
+        return {
+          reason: 'findSendButton:silent',
+          force: false,
+          silent: true,
+          cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+        };
+      }
+      if (typeof reasonOrOptions === 'string') {
+        return {
+          reason: reasonOrOptions,
+          force: false,
+          silent: false,
+          cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+        };
+      }
+      const opts = reasonOrOptions && typeof reasonOrOptions === 'object'
+        ? reasonOrOptions
+        : {};
+      return {
+        reason: String(opts.reason || '-').trim() || '-',
+        force: opts.force === true,
+        silent: opts.silent === true,
+        cacheTtlMs: Number.isFinite(Number(opts.cacheTtlMs))
+          ? Number(opts.cacheTtlMs)
+          : REAL_SEND_BUTTON_CACHE_TTL_MS,
+      };
+    }
+
+    function isForceRealSendButtonCheckReason(reason) {
+      const text = String(reason || '').trim();
+      if (!text) {
+        return false;
+      }
+      return (
+        /(^|:)(critical|user-click|manual-click|button-click|diagnose|abort|stop)(:|$)/i.test(text)
+        || /(^|:)(send-message-click|native-send-click|start-upload-click|copy-hotkey-click)(:|$)/i.test(text)
+        || /(^|:)(closed-loop-start|closed-loop-stop|closed-loop-send|closed-loop-upload)(:|$)/i.test(text)
+        || /reply-stable-fast:|wait-reply-timeout-reconcile-final|after-native-send|after-send-click|after-stop-click/i.test(text)
+      );
+    }
+
+    function shouldResolveRealStopButtonForReason(reason) {
+      const text = String(reason || '').trim();
+      return /stop-click|before-stop-click|after-stop-click|real-stop-button|stop-button-probe|stop-button-present/i.test(text);
+    }
+
+    function isRealStopButtonElement(button) {
+      if (!(button instanceof HTMLButtonElement)) {
+        return false;
+      }
+      return String(button.getAttribute('data-testid') || '') === 'stop-button';
+    }
+
+    function getRealSendButtonSignature(button) {
+      if (!button) {
+        return 'none';
+      }
+      const testid = button.getAttribute('data-testid') || '-';
+      const aria = button.getAttribute('aria-label') || '-';
+      const disabled = button.disabled || button.getAttribute('aria-disabled') === 'true' ? 1 : 0;
+      const connected = button.isConnected ? 1 : 0;
+      return [
+        testid,
+        aria,
+        disabled,
+        connected,
+      ].join('|');
+    }
+
+    function isCachedRealSendButtonUsable(button) {
+      if (!button) {
+        return false;
+      }
+      if (!button.isConnected) {
+        return false;
+      }
+      if (typeof document !== 'undefined' && document && typeof document.contains === 'function') {
+        return document.contains(button);
+      }
+      return true;
+    }
+
+    function invalidateRealSendButtonCache(reason = '-') {
+      const oldSignature = realSendButtonCacheSignature || '-';
+      realSendButtonCache = null;
+      realSendButtonCacheAt = 0;
+      realSendButtonCacheSignature = '';
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COMPOSER][REAL_SEND_BUTTON_CACHE_INVALIDATE] reason=${String(reason || '-')} oldSignature=${oldSignature}`,
+        );
+      }
+    }
+
+    function readRealSendButtonCache(options = {}) {
+      const opts = normalizeFindRealSendButtonOptions(options);
+      const now = Date.now();
+      const force = opts.force === true || isForceRealSendButtonCheckReason(opts.reason);
+      const ttlMs = Math.max(0, Number(opts.cacheTtlMs || REAL_SEND_BUTTON_CACHE_TTL_MS));
+      if (force || ttlMs <= 0) {
+        return null;
+      }
+      if (!realSendButtonCache || !isCachedRealSendButtonUsable(realSendButtonCache)) {
+        return null;
+      }
+      const wantsStop = shouldResolveRealStopButtonForReason(opts.reason);
+      const cachedIsStop = isRealStopButtonElement(realSendButtonCache);
+      if (wantsStop !== cachedIsStop) {
+        return null;
+      }
+      if (now - Number(realSendButtonCacheAt || 0) > ttlMs) {
+        return null;
+      }
+      const currentSignature = getRealSendButtonSignature(realSendButtonCache);
+      if (currentSignature !== realSendButtonCacheSignature) {
+        realSendButtonCacheSignature = currentSignature;
+        realSendButtonCacheAt = now;
+      }
+      if (
+        !opts.silent
+        && typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+        && now - Number(realSendButtonCacheHitLogAt || 0) > REAL_SEND_BUTTON_CACHE_HIT_LOG_INTERVAL_MS
+      ) {
+        realSendButtonCacheHitLogAt = now;
+        ToolboxShell.appendLog(
+          `[COMPOSER][REAL_SEND_BUTTON_CACHE_HIT] reason=${opts.reason} signature=${currentSignature} ageMs=${now - Number(realSendButtonCacheAt || 0)} ttlMs=${ttlMs}`,
+        );
+      }
+      return realSendButtonCache;
+    }
+
+    function writeRealSendButtonCache(button, options = {}) {
+      const opts = normalizeFindRealSendButtonOptions(options);
+      const wantsStop = shouldResolveRealStopButtonForReason(opts.reason);
+      const buttonIsStop = isRealStopButtonElement(button);
+      if (!button || !isCachedRealSendButtonUsable(button) || wantsStop !== buttonIsStop) {
+        realSendButtonCache = null;
+        realSendButtonCacheAt = 0;
+        realSendButtonCacheSignature = '';
+        return;
+      }
+      realSendButtonCache = button;
+      realSendButtonCacheAt = Date.now();
+      realSendButtonCacheSignature = getRealSendButtonSignature(button);
+      if (
+        !opts.silent
+        && typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLogIfChanged === 'function'
+      ) {
+        ToolboxShell.appendLogIfChanged(
+          'COMPOSER:REAL_SEND_BUTTON_CACHE_WRITE',
+          realSendButtonCacheSignature,
+          `[COMPOSER][REAL_SEND_BUTTON_CACHE_WRITE] reason=${opts.reason} signature=${realSendButtonCacheSignature}`,
+          1500,
+        );
+      }
+    }
+
+    function queryRealStopButtonUncached(reason = '-') {
+      if (typeof document === 'undefined' || !document) {
+        return null;
+      }
+      const selectors = [
+        '[data-testid="stop-button"]',
+        'button[aria-label*="停止回答"]',
+        'button[aria-label*="停止"]',
+        'button[aria-label*="Stop"]',
+        'button[aria-label*="stop"]',
+      ];
+      let btn = null;
+      for (let i = 0; i < selectors.length; i += 1) {
+        const candidate = document.querySelector(selectors[i]);
+        if (!(candidate instanceof HTMLButtonElement) || !candidate.isConnected) {
+          continue;
+        }
+        const rect = candidate.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          btn = candidate;
+          break;
+        }
+      }
+      if (!btn) {
+        const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
+        const found = candidates.find((item) => {
+          if (!(item instanceof HTMLButtonElement) || !item.isConnected) {
+            return false;
+          }
+          const rect = item.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+        btn = found instanceof HTMLButtonElement ? found : null;
+      }
+      const testid = btn ? String(btn.getAttribute('data-testid') || '') : '';
+      const aria = btn ? String(btn.getAttribute('aria-label') || '') : '';
+      const disabled = btn && (btn.disabled || btn.getAttribute('aria-disabled') === 'true') ? 1 : 0;
+      const realStopButtonCheckSignature = [
+        testid || '-',
+        aria || '-',
+        disabled,
+        btn && btn.isConnected ? 1 : 0,
+      ].join('|');
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLogIfChanged === 'function'
+      ) {
+        ToolboxShell.appendLogIfChanged(
+          'COMPOSER:REAL_STOP_BUTTON_CHECK',
+          realStopButtonCheckSignature,
+          `[COMPOSER][REAL_SEND_BUTTON_CHECK] reason=${reason} testid=${testid || '-'} aria=${aria || '-'} disabled=${disabled}`,
+          1500,
+        );
+      }
+      return btn;
+    }
+
+    function findChatGPTSendButtonUncached(reasonOrOptions = 'findChatGPTSendButton') {
+      const realButtonOptions = normalizeFindRealSendButtonOptions(reasonOrOptions);
+      const reason = realButtonOptions.reason;
+
+      if (shouldResolveRealStopButtonForReason(reason)) {
+        return queryRealStopButtonUncached(reason);
+      }
+
+      const selectors = [
+        'button#composer-submit-button',
+        'button[data-testid="send-button"]',
+        'button[data-testid="composer-send-button"]',
+        'button[aria-label="Send prompt"]',
+        'button[aria-label="发送提示"]',
+      ];
+      let btn = null;
+      for (let i = 0; i < selectors.length; i += 1) {
+        const candidate = document.querySelector(selectors[i]);
+        if (candidate instanceof HTMLButtonElement) {
+          btn = candidate;
+          break;
+        }
+      }
+
+      const testid = btn ? String(btn.getAttribute('data-testid') || '') : '';
+      const aria = btn ? String(btn.getAttribute('aria-label') || '') : '';
+      const disabled = !!(btn && (
+        btn.disabled
+        || btn.getAttribute('aria-disabled') === 'true'
+        || btn.classList.contains('disabled')
+      ));
+      const realSendButtonCheckSignature = [
+        testid || '-',
+        aria || '-',
+        disabled ? 1 : 0,
+        btn && btn.isConnected ? 1 : 0,
+      ].join('|');
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLogIfChanged === 'function'
+      ) {
+        ToolboxShell.appendLogIfChanged(
+          'COMPOSER:REAL_SEND_BUTTON_CHECK',
+          realSendButtonCheckSignature,
+          `[COMPOSER][REAL_SEND_BUTTON_CHECK] reason=${reason} testid=${testid || '-'} aria=${aria || '-'} disabled=${disabled ? 1 : 0}`,
+          1500,
+        );
+      } else if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLog === 'function'
+      ) {
+        ToolboxShell.appendLog(
+          `[COMPOSER][REAL_SEND_BUTTON_CHECK] reason=${reason} testid=${testid || '-'} aria=${aria || '-'} disabled=${disabled ? 1 : 0}`,
+        );
+      }
+
+      if (!btn || disabled) {
+        return null;
+      }
+
+      return btn;
+    }
+
+    function findChatGPTSendButton(reasonOrOptions = 'findChatGPTSendButton') {
+      const opts = normalizeFindRealSendButtonOptions(reasonOrOptions);
+      const force = opts.force === true || isForceRealSendButtonCheckReason(opts.reason);
+      if (!force) {
+        const cachedButton = readRealSendButtonCache(opts);
+        if (cachedButton) {
+          return cachedButton;
+        }
+      }
+      let button = null;
+      try {
+        button = findChatGPTSendButtonUncached(opts);
+        writeRealSendButtonCache(button, opts);
+        return button;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        const errStack = error && error.stack ? String(error.stack).slice(0, 1200) : '';
+        console.error('[COMPOSER][REAL_SEND_BUTTON_CHECK_FAILED]', error);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[COMPOSER][REAL_SEND_BUTTON_CHECK_FAILED] reason=${opts.reason} error=${errText} stack=${errStack}`,
+          );
+        }
+        return null;
+      }
+    }
+
+    function findSendButton(reasonOrOptions = 'findSendButton') {
+      const opts = normalizeFindRealSendButtonOptions(reasonOrOptions);
+      return findChatGPTSendButton({
+        reason: opts.reason || 'findSendButton',
+        force: opts.force === true,
+        silent: opts.silent === true,
+        cacheTtlMs: opts.cacheTtlMs,
+      });
+    }
 
     function createToolboxWorkerRuntime() {
       if (toolboxWorkerRuntime) {
@@ -1968,8 +2286,49 @@
     });
 
     function normalizeClosedLoopAction(action) {
-      const key = String(action || '').trim();
-      return key;
+      const startedAt = Date.now();
+      try {
+        if (
+          window.ToolboxClosedLoopConfig
+          && typeof window.ToolboxClosedLoopConfig.normalizeClosedLoopAction === 'function'
+        ) {
+          const normalized = window.ToolboxClosedLoopConfig.normalizeClosedLoopAction(action);
+          console.log('[UPLOAD_MODULE][DELEGATE_CLOSED_LOOP_ACTION]', {
+            input: action,
+            normalized,
+            delegate: 'ToolboxClosedLoopConfig.normalizeClosedLoopAction',
+            costMs: Date.now() - startedAt,
+          });
+          return normalized;
+        }
+        if (
+          typeof ClosedLoopConfig !== 'undefined'
+          && ClosedLoopConfig
+          && typeof ClosedLoopConfig.normalizeClosedLoopAction === 'function'
+        ) {
+          const normalized = ClosedLoopConfig.normalizeClosedLoopAction(action);
+          console.log('[UPLOAD_MODULE][DELEGATE_CLOSED_LOOP_ACTION]', {
+            input: action,
+            normalized,
+            delegate: 'ClosedLoopConfig.normalizeClosedLoopAction',
+            costMs: Date.now() - startedAt,
+          });
+          return normalized;
+        }
+        console.error('[UPLOAD_MODULE][CLOSED_LOOP_CONFIG_MISSING]', {
+          fn: 'normalizeClosedLoopAction',
+          input: action,
+          costMs: Date.now() - startedAt,
+        });
+        return action;
+      } catch (e) {
+        console.error('[UPLOAD_MODULE][NORMALIZE_CLOSED_LOOP_ACTION_FAILED]', {
+          input: action,
+          error: e && e.stack ? e.stack : String(e),
+          costMs: Date.now() - startedAt,
+        });
+        return action;
+      }
     }
 
     function getClosedLoopModeFromAction(action) {
@@ -3544,12 +3903,50 @@
     }
 
     function getClosedLoopButtonLabel(mode) {
-      const closedLoopCfg = getClosedLoopAutomationConfig();
-      const intervalText = getClosedLoopUploadPolicyText(mode, closedLoopCfg);
-      if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
-        return `闭环-仅对话+${intervalText}`;
+      const startedAt = Date.now();
+      try {
+        const closedLoopCfg = getClosedLoopAutomationConfig();
+        if (
+          window.ToolboxClosedLoopConfig
+          && typeof window.ToolboxClosedLoopConfig.getClosedLoopButtonLabel === 'function'
+        ) {
+          const label = window.ToolboxClosedLoopConfig.getClosedLoopButtonLabel(mode, closedLoopCfg);
+          console.log('[UPLOAD_MODULE][DELEGATE_CLOSED_LOOP_LABEL]', {
+            action: mode,
+            label,
+            delegate: 'ToolboxClosedLoopConfig.getClosedLoopButtonLabel',
+            costMs: Date.now() - startedAt,
+          });
+          return label;
+        }
+        if (
+          typeof ClosedLoopConfig !== 'undefined'
+          && ClosedLoopConfig
+          && typeof ClosedLoopConfig.getClosedLoopButtonLabel === 'function'
+        ) {
+          const label = ClosedLoopConfig.getClosedLoopButtonLabel(mode, closedLoopCfg);
+          console.log('[UPLOAD_MODULE][DELEGATE_CLOSED_LOOP_LABEL]', {
+            action: mode,
+            label,
+            delegate: 'ClosedLoopConfig.getClosedLoopButtonLabel',
+            costMs: Date.now() - startedAt,
+          });
+          return label;
+        }
+        console.error('[UPLOAD_MODULE][CLOSED_LOOP_CONFIG_MISSING]', {
+          fn: 'getClosedLoopButtonLabel',
+          action: mode,
+          costMs: Date.now() - startedAt,
+        });
+        return String(mode || '');
+      } catch (e) {
+        console.error('[UPLOAD_MODULE][GET_CLOSED_LOOP_BUTTON_LABEL_FAILED]', {
+          action: mode,
+          error: e && e.stack ? e.stack : String(e),
+          costMs: Date.now() - startedAt,
+        });
+        return String(mode || '');
       }
-      return `闭环-快捷键模式+${intervalText}`;
     }
 
     function getClosedLoopModeLabel(mode) {
@@ -4067,25 +4464,18 @@
       };
     }
 
-    function findNativeSendButtonForClosedLoop(reason = '-') {
-      let btn = null;
-      if (typeof findChatGPTSendButton === 'function') {
-        btn = findChatGPTSendButton(`closed-loop:${reason}`);
-      }
-      if (!(btn instanceof HTMLElement) && typeof findSendButton === 'function') {
-        btn = findSendButton(`closed-loop:${reason}`);
-      }
+    function findNativeSendButtonForClosedLoop(reason = '-', options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const forceLookup = opts.force === true
+        || /closed-loop-send|closed-loop-start|first-turn-send|send-current/i.test(String(reason || ''));
+      let btn = findChatGPTSendButton({
+        reason: `closed-loop:${reason}`,
+        force: forceLookup,
+        silent: !forceLookup,
+        cacheTtlMs: forceLookup ? 0 : REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
       if (!(btn instanceof HTMLElement) && typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.findSendButton === 'function') {
         btn = ComposerApi.findSendButton({ silent: true, reason: `closed-loop:${reason}` });
-      }
-      if (!(btn instanceof HTMLElement)) {
-        btn = document.querySelector('button#composer-submit-button');
-      }
-      if (!(btn instanceof HTMLElement)) {
-        btn = document.querySelector('button[data-testid="send-button"]');
-      }
-      if (!(btn instanceof HTMLElement)) {
-        btn = document.querySelector('button[aria-label*="发送"], button[aria-label*="Send"]');
       }
       return btn instanceof HTMLElement ? btn : null;
     }
@@ -4210,6 +4600,18 @@
         setStatus('闭环启动失败：当前发送按钮不可用，请检查输入框和附件状态', 'error');
         return false;
       }
+      invalidateRealSendButtonCache('before-closed-loop-send-click');
+      sendBtn = findSendButton({
+        reason: 'closed-loop-send:user-click',
+        force: true,
+        silent: false,
+        cacheTtlMs: 0,
+      });
+      if (!(sendBtn instanceof HTMLElement)) {
+        ToolboxShell.appendLog('[SEND_TASK][REAL_SEND_BUTTON_MISSING] reason=closed-loop-send-current');
+        setStatus('闭环发送失败：未找到 ChatGPT 原生发送按钮', 'error');
+        return false;
+      }
       sendBtn.dispatchEvent(new PointerEvent('pointerdown', {
         bubbles: true,
         cancelable: true,
@@ -4224,6 +4626,7 @@
         cancelable: true,
       }));
       sendBtn.click();
+      invalidateRealSendButtonCache('after-closed-loop-send-click');
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][SEND_CURRENT_COMPOSER_CLICKED] mode=${normalizedMode || '-'} source=${source || '-'}`,
       );
@@ -4470,10 +4873,10 @@
         }
       }
       if (normalizedAction === 'closed-loop-with-hotkey-upload-every-round') {
-        return '闭环-快捷键模式+每1轮上传';
+        return '闭环-快捷键+每1轮上传';
       }
       if (normalizedAction === 'closed-loop-with-hotkey') {
-        return '闭环-快捷键模式+每5轮上传';
+        return '闭环-快捷键+每5轮上传';
       }
       if (normalizedAction === 'closed-loop-without-hotkey') {
         return '闭环-仅对话+每5轮上传';
@@ -6506,10 +6909,12 @@
         return false;
       }
 
-      const stopButton = document.querySelector(
-        'button[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"], button[aria-label*="stop"]',
-      );
-      const hasNativeStopButton = stopButton instanceof HTMLButtonElement
+      const stopButton = findSendButton({
+        reason: 'send-copy-hotkey:stop-button-probe',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
+      const hasNativeStopButton = isRealStopButtonElement(stopButton)
         && !isToolboxDomNode(stopButton);
 
       if (hasNativeStopButton) {
@@ -6730,10 +7135,12 @@
       }
 
       const stableMs = Date.now() - Number(sendCopyHotkeyLastAssistantTextChangedAt || 0);
-      const stopButton = document.querySelector(
-        'button[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"], button[aria-label*="stop"]',
-      );
-      const hasNativeStopButton = stopButton instanceof HTMLButtonElement
+      const stopButton = findSendButton({
+        reason: 'send-copy-hotkey:stop-button-probe',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
+      const hasNativeStopButton = isRealStopButtonElement(stopButton)
         && !isToolboxDomNode(stopButton);
 
       if (!hasNativeStopButton && isAssistantReplyFinishedNow(reason)) {
@@ -7773,15 +8180,12 @@
       if (typeof isComposerReallySendReady === 'function') {
         return isComposerReallySendReady('native-send-ready-compose');
       }
-      if (typeof getRealComposerSendButton === 'function') {
-        return getRealComposerSendButton('native-send-ready-compose') instanceof HTMLButtonElement;
-      }
-      const btn = document.querySelector('button[data-testid="send-button"]');
-      return !!(
-        btn instanceof HTMLButtonElement
-        && !btn.disabled
-        && btn.getAttribute('aria-disabled') !== 'true'
-      );
+      const btn = findSendButton({
+        reason: 'native-send-ready-compose',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
+      return btn instanceof HTMLButtonElement;
     }
 
     function isTemporarySendNotReadyReason(reason) {
@@ -7979,26 +8383,19 @@
     }
 
     function hasVisibleNativeStopButtonForWaitReply() {
-      if (typeof document === 'undefined') {
+      const stopButton = findSendButton({
+        reason: 'wait-reply:stop-button-probe',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
+      if (!(stopButton instanceof HTMLButtonElement)) {
         return false;
       }
-      const stopButtonCandidates = Array.from(document.querySelectorAll([
-        '[data-testid="stop-button"]',
-        'button[aria-label*="停止回答"]',
-        'button[aria-label*="停止生成"]',
-        'button[aria-label*="Stop"]',
-        'button[aria-label*="stop"]',
-      ].join(',')));
-      return stopButtonCandidates.some((btn) => {
-        if (!(btn instanceof HTMLElement)) {
-          return false;
-        }
-        if (typeof isNativeStopButtonElement === 'function' && !isNativeStopButtonElement(btn)) {
-          return false;
-        }
-        const rect = btn.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      });
+      if (typeof isNativeStopButtonElement === 'function' && !isNativeStopButtonElement(stopButton)) {
+        return false;
+      }
+      const rect = stopButton.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
     }
 
     const SEND_COPY_HOTKEY_COMPOSE_WAIT_REPLY_TIMEOUT_MS = 0;
@@ -8416,10 +8813,12 @@
       const composerTextLenForSimpleCombo = composerTextForSimpleCombo.length;
       let realSendReadyForSimpleCombo = 0;
       let canSendForSimpleCombo = 0;
-      if (typeof findChatGPTSendButton === 'function') {
-        const realSendButtonForSimpleCombo = findChatGPTSendButton('send-copy-hotkey-simple:payload-check');
-        realSendReadyForSimpleCombo = realSendButtonForSimpleCombo ? 1 : 0;
-      }
+      const realSendButtonForSimpleCombo = findChatGPTSendButton({
+        reason: 'send-copy-hotkey-simple:payload-check',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
+      realSendReadyForSimpleCombo = realSendButtonForSimpleCombo ? 1 : 0;
       if (composerTextLenForSimpleCombo > 0 || composerAttachmentCountForSimpleCombo > 0) {
         canSendForSimpleCombo = 1;
       }
@@ -9742,11 +10141,16 @@
         return false;
       }
 
-      const stopButton = document.querySelector(
-        'button[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"], button[aria-label*="stop"]',
-      );
+      invalidateRealSendButtonCache('before-stop-click');
+      const stopButton = findSendButton({
+        reason: 'stop-click:user-click',
+        force: true,
+        silent: false,
+        cacheTtlMs: 0,
+      });
       if (stopButton instanceof HTMLButtonElement && !isToolboxDomNode(stopButton)) {
         stopButton.click();
+        invalidateRealSendButtonCache('after-stop-click');
         ToolboxShell.appendLog(
           `[SEND_COPY_HOTKEY][CANCEL_CLICK_NATIVE_STOP] reason=${src || '-'} phase=${phase || sendPhase || '-'}`,
         );
@@ -12881,9 +13285,11 @@
         && !hasValidConversationId
         && !hasHistoryTurn
       );
-      const sendBtn = typeof findChatGPTSendButton === 'function'
-        ? findChatGPTSendButton(`closed-loop-first-turn:${reason}`)
-        : document.querySelector('button[data-testid="send-button"], button#composer-submit-button');
+      const sendBtn = findChatGPTSendButton({
+        reason: `closed-loop-first-turn:${reason}`,
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
       const nativeSendReady = !!(
         sendBtn instanceof HTMLElement
         && !sendBtn.disabled
@@ -13005,20 +13411,34 @@
         return false;
       }
       setClosedLoopStartPending(normalizedMode, `${source}:after-first-turn-send`);
-      sendBtn.dispatchEvent(new PointerEvent('pointerdown', {
+      invalidateRealSendButtonCache('before-closed-loop-first-turn-send');
+      const firstTurnSendBtn = findSendButton({
+        reason: 'closed-loop-send:user-click',
+        force: true,
+        silent: false,
+        cacheTtlMs: 0,
+      });
+      if (!(firstTurnSendBtn instanceof HTMLElement)) {
+        ToolboxShell.appendLog('[SEND_TASK][REAL_SEND_BUTTON_MISSING] reason=closed-loop-first-turn-send');
+        setStatus('闭环发送失败：未找到 ChatGPT 原生发送按钮', 'error');
+        renderClosedLoopContinueButtons();
+        return false;
+      }
+      firstTurnSendBtn.dispatchEvent(new PointerEvent('pointerdown', {
         bubbles: true,
         cancelable: true,
         pointerType: 'mouse',
       }));
-      sendBtn.dispatchEvent(new MouseEvent('mousedown', {
+      firstTurnSendBtn.dispatchEvent(new MouseEvent('mousedown', {
         bubbles: true,
         cancelable: true,
       }));
-      sendBtn.dispatchEvent(new MouseEvent('mouseup', {
+      firstTurnSendBtn.dispatchEvent(new MouseEvent('mouseup', {
         bubbles: true,
         cancelable: true,
       }));
-      sendBtn.click();
+      firstTurnSendBtn.click();
+      invalidateRealSendButtonCache('after-closed-loop-first-turn-send');
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][FIRST_TURN_SENT] mode=${normalizedMode || '-'} source=${source || '-'} textLen=${firstTurn.composerTextLen} readyAttachment=${firstTurn.readyAttachmentCount}`,
       );
@@ -13708,10 +14128,12 @@
 
       let stopButtonPresent = false;
       try {
-        const stopButton = typeof document !== 'undefined'
-          ? document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]')
-          : null;
-        stopButtonPresent = !!(stopButton && stopButton instanceof HTMLElement);
+        const stopButton = findSendButton({
+          reason: 'closed-loop:stop-button-probe',
+          silent: true,
+          cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+        });
+        stopButtonPresent = isRealStopButtonElement(stopButton);
       } catch (err) {
         console.error('[CLOSED_LOOP][SEND_FALSE_NEGATIVE_CHECK] stop button query failed', err);
         ToolboxShell.appendLog(
@@ -17992,7 +18414,24 @@
 
 
     function normalizeUploadItem(...args) {
-      return ensureUploadQueueStore().normalizeUploadItem(...args);
+      const startedAt = Date.now();
+      try {
+        const store = ensureUploadQueueStore();
+        const result = store.normalizeUploadItem(...args);
+        console.log('[UPLOAD_MODULE][DELEGATE_NORMALIZE_UPLOAD_ITEM]', {
+          argsCount: args.length,
+          delegate: 'UploadQueueStore.normalizeUploadItem',
+          costMs: Date.now() - startedAt,
+        });
+        return result;
+      } catch (e) {
+        console.error('[UPLOAD_MODULE][NORMALIZE_UPLOAD_ITEM_FAILED]', {
+          argsCount: args.length,
+          error: e && e.stack ? e.stack : String(e),
+          costMs: Date.now() - startedAt,
+        });
+        throw e;
+      }
     }
 
 
@@ -18131,56 +18570,59 @@
     }
 
     function setCopyContinueButtonBusy(btn, busy, options = {}) {
-      if (!btn) {
-        return;
+      /*
+       * 状态统一收口：
+       * 本函数保留为兼容入口，但不再直接写按钮 DOM。
+       * 复制并继续按钮的显示状态必须由：
+       * state.copyContinueTask / ButtonTasks -> buildUploadButtonRenderSnapshot -> UploadButtonVm.getCopyContinueButtonViewState -> ButtonState
+       * 统一生成。
+       */
+      const opts = options && typeof options === 'object' ? options : {};
+      const busyFlag = !!busy;
+      const reasonText = String(opts.reason || (busyFlag ? 'copy-continue-busy' : 'copy-continue-idle')).trim();
+      if (!state.copyContinueTask || typeof state.copyContinueTask !== 'object') {
+        state.copyContinueTask = {
+          phase: 'idle',
+          runId: '',
+          cancelRequested: false,
+          startedAt: 0,
+          lastError: null,
+        };
       }
-
-      if (!busy) {
-        btn.dataset.busy = '0';
-        btn.dataset.busyAt = '0';
-        btn.dataset.waitingReply = '0';
-        btn.classList.remove('cgpt-btn-busy');
-        const copyContinueIdleText = String(options.idleText || '复制并继续');
-        btn.textContent = getStableButtonText(btn, { text: copyContinueIdleText }) || copyContinueIdleText;
-        markUploadActionButtonStableLabel(btn, copyContinueIdleText);
-        btn.classList.remove('cgpt-action-button-active');
-        applyWaitingAnswerButtonStyle(btn, false, {
-          extraIdleClasses: ['copy-continue'],
-        });
-        if (typeof clearButtonLongWaitDangerTimer === 'function') {
-          clearButtonLongWaitDangerTimer(btn, 'copy-continue-idle');
-        }
-        btn.disabled = false;
-        btn.removeAttribute('disabled');
-        btn.removeAttribute('aria-disabled');
-        btn.setAttribute('aria-disabled', 'false');
-        return;
+      if (busyFlag) {
+        const startedAt = Number(opts.startedAt) > 0 ? Number(opts.startedAt) : Date.now();
+        state.copyContinueTask.phase = 'running';
+        state.copyContinueTask.startedAt = startedAt;
+        state.copyContinueTask.cancelRequested = false;
+        copyContinueTaskRunning = true;
+        copyContinueTaskStartedAt = startedAt;
+        setButtonTaskPhaseScoped('copy-continue', 'running', reasonText);
+      } else {
+        state.copyContinueTask.phase = 'idle';
+        state.copyContinueTask.runId = '';
+        state.copyContinueTask.cancelRequested = false;
+        state.copyContinueTask.startedAt = 0;
+        copyContinueTaskRunning = false;
+        copyContinueTaskStartedAt = 0;
+        setButtonTaskPhaseScoped('copy-continue', 'idle', reasonText);
       }
-
-      const startedAt = Number(options.startedAt) > 0 ? Number(options.startedAt) : Date.now();
-      const assistantBusy = !!options.assistantBusy;
-      btn.dataset.busy = '1';
-      btn.dataset.busyAt = String(startedAt);
-      btn.dataset.waitingReply = assistantBusy ? '1' : '0';
-      btn.classList.add('cgpt-btn-busy', 'cgpt-action-button-active');
-      const copyContinueIdleText = String(options.idleText || btn.dataset.idleLabel || '复制并继续');
-      markUploadActionButtonStableLabel(btn, copyContinueIdleText);
-      const busyStatusText = String(options.text || (assistantBusy ? '等待回复...' : '继续中...'));
-      btn.dataset.cgptStatusText = busyStatusText;
-      const stableBusyText = getStableButtonText(btn, { text: copyContinueIdleText }) || copyContinueIdleText;
-      btn.textContent = stableBusyText;
-      btn.title = busyStatusText;
-      applyWaitingAnswerButtonStyle(btn, isWaitingAnswerVisualState({
-        text: stableBusyText,
-        isResponding: assistantBusy,
-      }), {
-        extraIdleClasses: ['copy-continue'],
+      if (btn) {
+        logManagedButtonDomBypassBlocked(
+          btn,
+          'setCopyContinueButtonBusy',
+          `state-only busy=${busyFlag ? 1 : 0}`,
+        );
+      }
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_CONTINUE][BUSY_STATE_ONLY] busy=${busyFlag ? 1 : 0} phase=${state.copyContinueTask.phase || '-'} reason=${reasonText || '-'}`,
+        );
+      }
+      requestManagedButtonVmRender(`copy-continue:busy-state-only:${reasonText || '-'}`, {
+        force: true,
+        immediate: false,
+        heavy: false,
       });
-      btn.disabled = true;
-      btn.setAttribute('aria-disabled', 'true');
-      if (typeof startButtonLongWaitDangerTimer === 'function') {
-        startButtonLongWaitDangerTimer(btn, 'long_wait_reply_or_send', BUTTON_LONG_WAIT_DANGER_MS);
-      }
     }
 
     function playCopySuccessBeepSafe(source, logPrefix) {
@@ -20820,7 +21262,6 @@
 
     const TOP_STATUS_SLOT_ORDER = [
       'reply-state',
-      'page-connection',
       'page-id',
       'turn-count',
       'upload-usage',
@@ -20832,7 +21273,6 @@
 
     const TOP_STATUS_SLOT_EXTRA_CLASSES = {
       'reply-state': 'cgpt-status-pill cgpt-toolbox-status-primary-badge',
-      'page-connection': 'cgpt-toolbox-page-connection-badge cgpt-top-stat-secondary',
       'page-id': 'cgpt-toolbox-page-id-badge',
       'turn-count': 'cgpt-toolbox-turn-count-badge cgpt-toolbox-page-turn-badge cgpt-toolbox-must-show-badge cgpt-page-count-badge',
       'upload-usage': 'cgpt-toolbox-upload-quota-badge cgpt-toolbox-low-priority-badge cgpt-top-stat-secondary cgpt-local-upload-badge',
@@ -20841,6 +21281,137 @@
       'attachment-state': 'cgpt-top-badge-attachment',
       'alert-state': 'cgpt-top-status-alert',
     };
+
+    const TOP_STATUS_SLOT_LOG_KEYS = {
+      'reply-state': 'reply',
+      'task-state': 'task',
+      'attachment-state': 'attachment',
+      'page-id': 'page',
+      'turn-count': 'turn',
+      'upload-usage': 'upload',
+      'message-usage': 'message',
+      'alert-state': 'alert',
+    };
+
+    const TOP_STATUS_RESERVED_PLACEHOLDER_SLOTS = new Set([
+      'attachment-state',
+    ]);
+
+    const TOP_STATUS_FIXED_SLOT_WIDTH_PX = {};
+
+    const TOP_STATUS_IDLE_TEXT = {
+      'attachment-state': '附件:0·队列:0',
+    };
+
+    function getTopStatusFixedSlotWidthPx(slotName) {
+      const key = String(slotName || '').trim();
+      const width = TOP_STATUS_FIXED_SLOT_WIDTH_PX[key];
+      return Number.isFinite(width) && width > 0 ? width : 0;
+    }
+
+    function getTopStatusIdleText(slotName) {
+      const key = String(slotName || '').trim();
+      return TOP_STATUS_IDLE_TEXT[key] || '';
+    }
+
+    function applyTopStatusFixedSlotWidth(el, slotName) {
+      if (!(el instanceof HTMLElement)) {
+        return false;
+      }
+      const key = String(slotName || '').trim();
+      if (!key) {
+        return false;
+      }
+      el.dataset.topStatusSlot = key;
+      el.classList.add(`cgpt-top-status-slot-${key}`);
+      const widthPx = getTopStatusFixedSlotWidthPx(key);
+      if (widthPx > 0) {
+        el.style.width = `${widthPx}px`;
+        el.style.minWidth = `${widthPx}px`;
+        el.style.maxWidth = `${widthPx}px`;
+        el.style.flex = `0 0 ${widthPx}px`;
+        el.style.boxSizing = 'border-box';
+        el.style.justifyContent = 'center';
+        el.style.overflow = 'hidden';
+        el.style.whiteSpace = 'nowrap';
+        el.style.textOverflow = 'ellipsis';
+      }
+      return true;
+    }
+
+    function isReservedTopStatusPlaceholderSlot(slotName) {
+      return TOP_STATUS_RESERVED_PLACEHOLDER_SLOTS.has(String(slotName || '').trim());
+    }
+
+    function applyReservedTopStatusPlaceholder(el, slotName, reason = '') {
+      if (!(el instanceof HTMLElement)) {
+        return false;
+      }
+      const key = String(slotName || '').trim();
+      const idleText = getTopStatusIdleText(key) || '空闲';
+      applyTopStatusFixedSlotWidth(el, key);
+      el.textContent = idleText;
+      el.title = idleText;
+      el.dataset.topStatusPlaceholder = '1';
+      el.classList.add(
+        'cgpt-top-status-empty',
+        'cgpt-top-status-placeholder',
+        'cgpt-top-status-idle',
+      );
+      el.classList.remove(
+        'is-hidden-placeholder',
+        'danger',
+        'red',
+        'busy',
+        'waiting',
+        'cgpt-btn-danger',
+        'cgpt-action-running',
+        'cgpt-btn-waiting-danger',
+        'cgpt-top-status-danger',
+        'cgpt-top-status-running',
+        'cgpt-top-status-variant-ok',
+        'cgpt-top-status-variant-danger',
+        'cgpt-top-status-variant-warning',
+        'cgpt-top-status-variant-info',
+      );
+      el.dataset.variant = 'muted';
+      el.style.display = 'inline-flex';
+      el.style.visibility = 'visible';
+      el.style.pointerEvents = 'none';
+      el.style.marginLeft = '0';
+      el.style.marginRight = '0';
+      el.style.alignSelf = 'center';
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLogIfChanged === 'function'
+      ) {
+        ToolboxShell.appendLogIfChanged(
+          `TOOLBOX_TOP_STATUS_PLACEHOLDER_${key}`,
+          `${key}|${idleText}|${reason}`,
+          `[TOOLBOX_TOP_STATUS][PLACEHOLDER_VISIBLE] slot=${key} text=${idleText} reason=${reason || '-'}`,
+          3000,
+        );
+      }
+      return true;
+    }
+
+    function clearReservedTopStatusPlaceholder(el) {
+      if (!(el instanceof HTMLElement)) {
+        return;
+      }
+      if (el.dataset.topStatusPlaceholder === '1') {
+        delete el.dataset.topStatusPlaceholder;
+      }
+      el.classList.remove(
+        'cgpt-top-status-empty',
+        'cgpt-top-status-placeholder',
+        'cgpt-top-status-idle',
+        'is-hidden-placeholder',
+      );
+      el.style.visibility = 'visible';
+      el.style.pointerEvents = '';
+    }
 
     const TOOLBOX_REPLY_STATES = Object.freeze({
       READY: 'ready',
@@ -20897,10 +21468,18 @@
       if (!statusRoot) {
         return;
       }
-      TOP_STATUS_SLOT_ORDER.forEach((slotName) => {
-        const el = statusRoot.querySelector(`[data-top-status-slot="${slotName}"]`);
-        if (el) {
-          statusRoot.appendChild(el);
+      TOP_STATUS_SLOT_ORDER.forEach((slotName, index) => {
+        const slot = statusRoot.querySelector(`[data-top-status-slot="${slotName}"]`);
+        if (slot) {
+          slot.style.order = String(index);
+          slot.style.marginLeft = '0';
+          slot.style.marginRight = '0';
+          slot.style.flex = '0 0 auto';
+          slot.style.alignSelf = 'center';
+          statusRoot.appendChild(slot);
+          if (getTopStatusFixedSlotWidthPx(slotName) > 0) {
+            applyTopStatusFixedSlotWidth(slot, slotName);
+          }
         }
       });
     }
@@ -20948,11 +21527,35 @@
       el.className = `cgpt-top-status-badge cgpt-toolbox-top-status-badge ${extraClasses} ${className}`.trim();
       el.hidden = false;
       el.style.display = '';
+      el.style.marginLeft = '0';
+      el.style.marginRight = '0';
+      el.style.flex = '0 0 auto';
+      el.style.alignSelf = 'center';
       reorderTopStatusSlots(statusRoot);
       return el;
     }
 
     function ensureAllTopStatusSlots(statusRoot) {
+      if (!statusRoot) {
+        return;
+      }
+      // page-connection 旧槽位已经废弃。
+      // 之前它被创建但没有填充文字，会以空胶囊形式占位，
+      // 导致“回答中”和“页ID”之间出现很大的空隙。
+      statusRoot.querySelectorAll('[data-top-status-slot="page-connection"]').forEach((el) => {
+        el.remove();
+      });
+      statusRoot.querySelectorAll('[data-top-status-slot]').forEach((el) => {
+        const slotName = el.dataset.topStatusSlot || '';
+        if (!TOP_STATUS_SLOT_ORDER.includes(slotName)) {
+          el.remove();
+          return;
+        }
+        el.style.marginLeft = '0';
+        el.style.marginRight = '0';
+        el.style.flex = '0 0 auto';
+        el.style.alignSelf = 'center';
+      });
       TOP_STATUS_SLOT_ORDER.forEach((slotName) => {
         ensureTopStatusSlot(statusRoot, slotName);
       });
@@ -20962,13 +21565,7 @@
 
     function normalizeTopStatusSlotText(text, slotName = '', state = '', title = '') {
       const raw = String(text == null ? '' : text).trim();
-      if (raw) {
-        return raw;
-      }
       const normalizedSlot = String(slotName || '').trim().toLowerCase();
-      const normalizedState = String(state || '').trim().toLowerCase();
-      const normalizedTitle = String(title == null ? '' : title).trim().toLowerCase();
-
       const isTaskLikeSlot = (
         normalizedSlot === 'task-state'
         || normalizedSlot === 'task'
@@ -20976,6 +21573,15 @@
         || normalizedSlot === 'top-alert'
         || normalizedSlot === 'task-state-slot'
       );
+      if (raw === '-' && isTaskLikeSlot) {
+        return '';
+      }
+      if (raw) {
+        return raw;
+      }
+      const normalizedState = String(state || '').trim().toLowerCase();
+      const normalizedTitle = String(title == null ? '' : title).trim().toLowerCase();
+
       if (!isTaskLikeSlot) {
         return '';
       }
@@ -21033,6 +21639,13 @@
       }
       const safeText = normalizeTopStatusSlotText(text, slotName, state, title);
       if (!safeText) {
+        if (isReservedTopStatusPlaceholderSlot(slotName)) {
+          return applyReservedTopStatusPlaceholder(
+            el,
+            slotName,
+            `empty-text:${String(reason || '-')}`,
+          );
+        }
         el.textContent = '';
         el.title = '';
         el.classList.add('cgpt-top-status-empty');
@@ -21061,9 +21674,18 @@
         }
         return false;
       }
-      el.style.display = '';
+      clearReservedTopStatusPlaceholder(el);
+      applyTopStatusFixedSlotWidth(el, slotName);
+      el.style.display = 'inline-flex';
+      el.style.visibility = 'visible';
+      el.style.pointerEvents = '';
       el.classList.remove('cgpt-top-status-empty');
       el.textContent = safeText;
+      if (title) {
+        el.title = String(title);
+      } else {
+        el.title = safeText;
+      }
       return true;
     }
 
@@ -21080,6 +21702,7 @@
       if (!el) {
         return null;
       }
+      applyTopStatusFixedSlotWidth(el, slotName);
 
       // spacer 永远不能渲染成彩色胶囊，更不能出现空白红块。
       if (slotName === 'top-status-spacer') {
@@ -21124,13 +21747,24 @@
       // 这里主要用于隐藏“回答中 + 等待回复”的重复 task-state。
       if (slotName !== 'alert-state') {
         if (isHidden) {
+          if (isReservedTopStatusPlaceholderSlot(slotName)) {
+            applyReservedTopStatusPlaceholder(
+              el,
+              slotName,
+              'updateTopStatusSlot:hidden',
+            );
+            return el;
+          }
           el.textContent = '';
           el.title = '';
           el.classList.add('cgpt-top-status-empty');
           el.style.display = 'none';
           return el;
         }
+        clearReservedTopStatusPlaceholder(el);
         el.style.display = '';
+        el.style.visibility = '';
+        el.style.pointerEvents = '';
       }
 
       if (slotName === 'alert-state') {
@@ -21280,15 +21914,13 @@
       }
 
       try {
-        if (typeof findChatGPTSendButton === 'function') {
-          const btn = findChatGPTSendButton();
-          hasRealSendButton = !!btn;
-          realSendButtonReady = !!(btn && !btn.disabled && btn.offsetParent !== null);
-        } else if (typeof findSendButton === 'function') {
-          const btn = findSendButton(true);
-          hasRealSendButton = !!btn;
-          realSendButtonReady = !!(btn && !btn.disabled && btn.offsetParent !== null);
-        }
+        const btn = findChatGPTSendButton({
+          reason: `authority-composer-evidence:${reason || '-'}`,
+          silent: true,
+          cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+        });
+        hasRealSendButton = !!btn;
+        realSendButtonReady = !!(btn && !btn.disabled && btn.offsetParent !== null);
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
         console.error('[TOOLBOX_AUTHORITY][SEND_BUTTON_READ_FAILED]', error);
@@ -21664,11 +22296,20 @@
     }
 
     function clickNativeSendButtonFromToolboxAuthority(authority, source = 'send-message-button') {
-      const nativeSendButton = typeof findChatGPTSendButton === 'function'
-        ? findChatGPTSendButton(`authority-send:${source}`)
-        : null;
+      invalidateRealSendButtonCache('before-native-send-click');
+      const nativeSendButton = findChatGPTSendButton({
+        reason: 'native-send-click:user-click',
+        force: true,
+        silent: false,
+        cacheTtlMs: 0,
+      });
 
       if (!nativeSendButton) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][REAL_SEND_BUTTON_MISSING] reason=native-send-click source=${source || '-'} `
+          + `textLen=${authority && authority.composer ? authority.composer.textLen || 0 : 0} `
+          + `hasPayload=${authority && authority.composer && authority.composer.hasPayload ? 1 : 0}`,
+        );
         ToolboxShell.appendLog(
           `[SEND_MESSAGE][NATIVE_SEND_BUTTON_MISSING_WHILE_AUTHORITY_CAN_SEND] `
           + `source=${source || '-'} `
@@ -21705,6 +22346,7 @@
       }
 
       nativeSendButton.click();
+      invalidateRealSendButtonCache('after-native-send-click');
 
       ToolboxShell.appendLog(
         `[SEND_MESSAGE][NATIVE_SEND_CLICKED] `
@@ -22047,7 +22689,7 @@
         }
         return {
           state: TOOLBOX_TASK_STATES.WAITING_REPLY,
-          text: '等回复',
+          text: '等待回复',
           busy: true,
           source: 'send-task',
           sendPhase,
@@ -22324,6 +22966,9 @@
 
         toolboxAuthorityStateCache = authority;
         toolboxAuthorityStateCacheAt = now;
+        if (typeof window !== 'undefined') {
+          window.__cgptToolboxAuthorityCache = authority;
+        }
 
         const authorityLogSignature = [
           authority.reply.state,
@@ -22804,7 +23449,7 @@
           && !readStillGeneratingForHeal()
         ) {
           ToolboxShell.appendLog(
-            '[TOOLBOX_TOP_STATUS][HEAL_CONFLICT] reply=待发送 oldTask=等回复 newTask=- reason=real-send-ready',
+            '[TOOLBOX_TOP_STATUS][HEAL_CONFLICT] reply=待发送 oldTask=等待回复 newTask=空闲 reason=real-send-ready',
           );
           return {
             text: useCompactText ? '空闲' : '空闲',
@@ -22813,7 +23458,7 @@
           };
         }
         return {
-          text: useCompactText ? '等回复' : '等待回复',
+          text: '等待回复',
           variant: 'danger',
           title: '已发送，等待 ChatGPT 回复',
         };
@@ -23529,6 +24174,27 @@
       return order.join(',');
     }
 
+    function formatTopStatusSlotLogEntry(slotName, slotTexts, currentTopAlertEntry = null) {
+      const logKey = TOP_STATUS_SLOT_LOG_KEYS[slotName] || slotName;
+      if (slotName === 'alert-state') {
+        const alertSlotText = (
+          typeof ToolboxShell !== 'undefined'
+          && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
+          && ToolboxShell.hasActiveTopAlertEntry(currentTopAlertEntry)
+        )
+          ? (slotTexts['alert-state'] || '报错')
+          : '-';
+        return `${logKey}=${alertSlotText}`;
+      }
+      return `${logKey}=${slotTexts[slotName] || '-'}`;
+    }
+
+    function formatTopStatusSlotLogLines(slotTexts, currentTopAlertEntry = null, separator = '\n') {
+      return TOP_STATUS_SLOT_ORDER
+        .map((slotName) => formatTopStatusSlotLogEntry(slotName, slotTexts, currentTopAlertEntry))
+        .join(separator);
+    }
+
     function logTopStatusSlots(slotTexts, reason, currentTopAlertEntry = null) {
       const now = Date.now();
       if (now - lastTopStatusSlotsLogAt < 3000) {
@@ -23536,24 +24202,10 @@
       }
       lastTopStatusSlotsLogAt = now;
 
-      const alertSlotText = (
-        typeof ToolboxShell !== 'undefined'
-        && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
-        && ToolboxShell.hasActiveTopAlertEntry(currentTopAlertEntry)
-      )
-        ? '报错'
-        : '-';
       const order = buildTopStatusSlotOrderForLog(currentTopAlertEntry);
       ToolboxShell.appendLog(
         `[TOOLBOX_TOP_STATUS][SLOTS]\n`
-        + `reply=${slotTexts['reply-state'] || '-'}\n`
-        + `page=${slotTexts['page-id'] || '-'}\n`
-        + `turn=${slotTexts['turn-count'] || '-'}\n`
-        + `upload=${slotTexts['upload-usage'] || '-'}\n`
-        + `message=${slotTexts['message-usage'] || '-'}\n`
-        + `task=${slotTexts['task-state'] || '-'}\n`
-        + `attachment=${slotTexts['attachment-state'] || '-'}\n`
-        + `alert=${alertSlotText}\n`
+        + `${formatTopStatusSlotLogLines(slotTexts, currentTopAlertEntry)}\n`
         + `compact=-\n`
         + `order=${order}\n`
         + `reason=${reason || '-'}`,
@@ -23585,6 +24237,11 @@
         return;
       }
 
+      // 清理历史版本残留的空 page-connection 槽位。
+      // 这个槽位没有实际内容，但会占用顶部状态栏空间。
+      pageStatusRowEl.querySelectorAll('[data-top-status-slot="page-connection"]').forEach((el) => {
+        el.remove();
+      });
       ensureAllTopStatusSlots(pageStatusRowEl);
 
       const pageDisplayId = getBridgePageDisplayIdText();
@@ -23748,7 +24405,7 @@
       const authorityTurnText = `轮数:${authority.page.turnCount || roundCount || 0}`;
       const authorityUploadText = authority.usage.uploadText || uploadQuotaText;
       const authorityMessageText = authority.usage.messageText || messageQuotaText;
-      const authorityTaskText = authority.task.state === TOOLBOX_TASK_STATES.IDLE ? '-' : authority.task.text;
+      const authorityTaskText = authority.task.state === TOOLBOX_TASK_STATES.IDLE ? '' : authority.task.text;
 
       const signature = [
         replyState.text,
@@ -23877,15 +24534,21 @@
         text: alertState.text || '',
         message: alertState.title || '',
       };
+      const inlineTopStatusSlotTexts = {
+        'reply-state': authority.reply.text,
+        'task-state': authority.task.state === TOOLBOX_TASK_STATES.IDLE
+          ? getTopStatusIdleText('task-state')
+          : authority.task.text,
+        'attachment-state': authority.attachment.text || getTopStatusIdleText('attachment-state'),
+        'page-id': authority.page.text,
+        'turn-count': `轮数:${authority.page.turnCount || 0}`,
+        'upload-usage': authority.usage.uploadText,
+        'message-usage': authority.usage.messageText,
+        'alert-state': alertState.hidden ? '-' : (alertState.text || '报错'),
+      };
       ToolboxShell.appendLog(
         `[TOOLBOX_TOP_STATUS][SLOTS] `
-        + `reply=${authority.reply.text} `
-        + `page=${authority.page.text} `
-        + `turn=轮数:${authority.page.turnCount || 0} `
-        + `upload=${authority.usage.uploadText} `
-        + `message=${authority.usage.messageText} `
-        + `task=${authority.task.state === TOOLBOX_TASK_STATES.IDLE ? '-' : authority.task.text} `
-        + `attachment=${authority.attachment.text} `
+        + `${formatTopStatusSlotLogLines(inlineTopStatusSlotTexts, currentTopAlertEntry, ' ')} `
         + `authorityReplyState=${authority.reply.state} `
         + `authorityTaskState=${authority.task.state} `
         + `authorityReady=${authority.flags.ready ? 1 : 0} `
@@ -23895,12 +24558,16 @@
 
       const slotTexts = {
         'reply-state': replyState.text,
+        'task-state': hideDuplicateWaitingReplyTaskState
+          ? '-'
+          : (authority.task.state === TOOLBOX_TASK_STATES.IDLE
+            ? getTopStatusIdleText('task-state')
+            : authorityTaskText),
+        'attachment-state': attachmentState.text || getTopStatusIdleText('attachment-state'),
         'page-id': authorityPageText,
         'turn-count': authorityTurnText,
         'upload-usage': authorityUploadText,
         'message-usage': authorityMessageText,
-        'task-state': hideDuplicateWaitingReplyTaskState ? '-' : authorityTaskText,
-        'attachment-state': attachmentState.text,
         'alert-state': (
           typeof ToolboxShell !== 'undefined'
           && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
@@ -24146,17 +24813,50 @@
     }
 
     async function waitChatGPTNativeUploadSettled(files, options = {}) {
-      if (
-        typeof UploadNativeRuntime !== 'undefined'
-        && UploadNativeRuntime
-        && typeof UploadNativeRuntime.waitChatGPTNativeUploadSettled === 'function'
-      ) {
-        return UploadNativeRuntime.waitChatGPTNativeUploadSettled(files, {
-          ...options,
-          detectNativeUploadError: detectChatGPTNativeUploadError,
+      const startedAt = Date.now();
+      try {
+        const runtime = (
+          typeof window !== 'undefined'
+          && window.UploadNativeRuntime
+        ) ? window.UploadNativeRuntime : (
+          typeof UploadNativeRuntime !== 'undefined' ? UploadNativeRuntime : null
+        );
+        if (runtime && typeof runtime.waitChatGPTNativeUploadSettled === 'function') {
+          const result = await runtime.waitChatGPTNativeUploadSettled(files, {
+            ...(options || {}),
+            reason: (options && options.reason) || 'upload-module:waitChatGPTNativeUploadSettled',
+            detectNativeUploadError: detectChatGPTNativeUploadError,
+          });
+          console.log('[UPLOAD_MODULE][DELEGATE_UPLOAD_SETTLED]', {
+            result,
+            delegate: 'UploadNativeRuntime.waitChatGPTNativeUploadSettled',
+            costMs: Date.now() - startedAt,
+          });
+          return result;
+        }
+        console.error('[UPLOAD_MODULE][UPLOAD_NATIVE_RUNTIME_MISSING]', {
+          fn: 'waitChatGPTNativeUploadSettled',
+          options: options || {},
+          costMs: Date.now() - startedAt,
         });
+        return {
+          ok: false,
+          reason: 'upload_native_runtime_missing',
+          costMs: Date.now() - startedAt,
+        };
+      } catch (e) {
+        console.error('[UPLOAD_MODULE][WAIT_UPLOAD_SETTLED_FAILED]', {
+          options: options || {},
+          error: e && e.stack ? e.stack : String(e),
+          costMs: Date.now() - startedAt,
+        });
+        return {
+          ok: false,
+          reason: 'wait_upload_settled_exception',
+          error: String(e && e.message ? e.message : e),
+          costMs: Date.now() - startedAt,
+        };
       }
-      return { ok: false, reason: 'native-upload-settle-timeout' };
     }
 
     async function waitComposerAttachmentReady(options = {}) {
@@ -27356,100 +28056,152 @@
       return copyState !== 'idle';
     }
 
-    function setCopyLastButtonState(stateName, reason = '') {
-      const btn = rootElRef
-        ? qs(UploadSelectors.copyLastMessageBtn, rootElRef)
-        : document.querySelector(UploadSelectors.copyLastMessageBtn);
+    function requestUnifiedButtonRender(reason = '-', options = {}) {
+      const reasonText = String(reason || '-').trim() || '-';
+      const opts = options && typeof options === 'object' ? options : {};
 
-      if (!btn) {
+      try {
+        if (typeof scheduleRenderUploadButtonsOnly === 'function') {
+          scheduleRenderUploadButtonsOnly({
+            buttonTasksReason: reasonText,
+            force: opts.force === true,
+            heavy: opts.heavy === true,
+            immediate: opts.immediate === true,
+          });
+          return true;
+        }
+
+        if (typeof scheduleRenderUpload === 'function') {
+          scheduleRenderUpload(reasonText);
+          return true;
+        }
+
+        if (typeof renderUploadButtonsOnly === 'function') {
+          renderUploadButtonsOnly({
+            buttonTasksReason: reasonText,
+            force: opts.force === true,
+            heavy: opts.heavy === true,
+            immediate: opts.immediate === true,
+          });
+          return true;
+        }
+
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[BUTTON_RENDER][REQUEST_SKIP] reason=${reasonText} detail=no-render-entry`,
+          );
+        }
+
+        return false;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        const errStack = error && error.stack ? String(error.stack).slice(0, 1200) : '';
+
+        console.error('[BUTTON_RENDER][REQUEST_FAILED]', error);
+
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[BUTTON_RENDER][REQUEST_FAILED] reason=${reasonText} error=${errText} stack=${errStack}`,
+          );
+        }
+
+        return false;
+      }
+    }
+
+    function logLegacyButtonDomMutationBlocked(source, detail = {}) {
+      const sourceText = String(source || '-').trim() || '-';
+
+      const detailText = Object.keys(detail || {}).map((key) => {
+        const value = detail[key];
+        return `${key}=${String(value == null ? '-' : value)}`;
+      }).join(' ');
+
+      console.error('[BUTTON_DOM][LEGACY_MUTATION_BLOCKED]', {
+        source: sourceText,
+        detail,
+      });
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[COPY_LAST][BUTTON_STATE_SKIP] state=${stateName} reason=${reason || '-'} detail=missing-button`,
+          `[BUTTON_DOM][LEGACY_MUTATION_BLOCKED] source=${sourceText}${detailText ? ` ${detailText}` : ''}`,
         );
-        return;
+      }
+    }
+
+    function normalizeCopyLastButtonStateName(stateName) {
+      const text = String(stateName || 'idle').trim().toLowerCase();
+
+      if (text === 'running' || text === 'busy' || text === 'copying' || text === 'waiting') {
+        return 'running';
       }
 
-      if (copyLastButtonResetTimer) {
+      if (text === 'success' || text === 'done' || text === 'ok') {
+        return 'success';
+      }
+
+      if (text === 'failed' || text === 'fail' || text === 'error') {
+        return 'failed';
+      }
+
+      return 'idle';
+    }
+
+    function resolveCopyLastTaskPhaseFromButtonState(stateName) {
+      const normalized = normalizeCopyLastButtonStateName(stateName);
+      const currentPhase = String(state.copyTask && state.copyTask.phase || '').trim().toLowerCase();
+
+      if (normalized === 'running') {
+        if (
+          currentPhase === 'waiting'
+          || currentPhase === 'copying'
+          || currentPhase === 'running'
+        ) {
+          return currentPhase;
+        }
+
+        return 'copying';
+      }
+
+      if (normalized === 'success') {
+        return 'success';
+      }
+
+      if (normalized === 'failed') {
+        return 'failed';
+      }
+
+      return 'idle';
+    }
+
+    function setCopyLastButtonState(stateName, reason = '') {
+      const normalizedState = normalizeCopyLastButtonStateName(stateName);
+      const nextPhase = resolveCopyLastTaskPhaseFromButtonState(normalizedState);
+      const reasonText = String(reason || '-').trim() || '-';
+
+      /*
+       * 统一状态收口：
+       * 本函数不再直接修改复制按钮 DOM。
+       * 只更新 copyTask / ButtonTasks，然后触发统一按钮渲染。
+       */
+      if (copyLastButtonResetTimer && normalizedState !== 'success' && normalizedState !== 'failed') {
         window.clearTimeout(copyLastButtonResetTimer);
         copyLastButtonResetTimer = 0;
       }
 
-      if (typeof ButtonState !== 'undefined' && typeof ButtonState.clearButtonStateClasses === 'function') {
-        ButtonState.clearButtonStateClasses(btn);
+      setCopyLastTaskPhase(nextPhase, `copy-last-button-state:${normalizedState}:${reasonText}`);
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_LAST][BUTTON_STATE_UNIFIED] state=${normalizedState} phase=${nextPhase} reason=${reasonText}`,
+        );
       }
 
-      COPY_LAST_BUTTON_EXTRA_CLASSES.forEach((cls) => {
-        btn.classList.remove(cls);
+      requestUnifiedButtonRender(`copy-last-button-state:${normalizedState}:${reasonText}`, {
+        force: normalizedState === 'running',
+        heavy: false,
+        immediate: false,
       });
-
-      btn.classList.remove(
-        'cgpt-copy-last-idle',
-        'cgpt-copy-last-running',
-        'cgpt-copy-last-success',
-        'cgpt-copy-last-failed',
-      );
-
-      btn.removeAttribute('aria-busy');
-      btn.disabled = false;
-      btn.removeAttribute('disabled');
-      delete btn.dataset.waitDanger;
-      delete btn.dataset.waitDangerReason;
-
-      if (stateName === 'running') {
-        markUploadActionButtonStableLabel(btn, '复制最后回复');
-        const copyLastStableText = getStableButtonText(btn, { text: '复制最后回复' }) || '复制最后回复';
-        btn.textContent = copyLastStableText;
-        btn.title = copyLastStableText;
-        btn.disabled = true;
-        btn.setAttribute('aria-busy', 'true');
-        btn.classList.add('cgpt-btn-busy', 'cgpt-action-button-active');
-        btn.classList.add('cgpt-copy-last-running');
-        btn.dataset.copyState = 'running';
-
-        ToolboxShell.appendLog(
-          `[COPY_LAST][BUTTON_STATE] state=running reason=${reason || '-'}`,
-        );
-
-        return;
-      }
-
-      if (stateName === 'success') {
-        const copyLastIdleText = '复制最后回复';
-        markUploadActionButtonStableLabel(btn, copyLastIdleText);
-        btn.textContent = getStableButtonText(btn, { text: copyLastIdleText }) || copyLastIdleText;
-        btn.title = copyLastIdleText;
-        btn.classList.remove('cgpt-action-button-active');
-        btn.dataset.copyState = 'idle';
-        btn.classList.add('cgpt-copy-last-idle');
-
-        ToolboxShell.appendLog(
-          `[COPY_LAST][BUTTON_STATE] state=success reason=${reason || '-'}`,
-        );
-
-        return;
-      }
-
-      if (stateName === 'failed') {
-        const copyLastIdleText = '复制最后回复';
-        markUploadActionButtonStableLabel(btn, copyLastIdleText);
-        btn.textContent = getStableButtonText(btn, { text: copyLastIdleText }) || copyLastIdleText;
-        btn.title = copyLastIdleText;
-        btn.classList.add('cgpt-copy-last-failed', 'cgpt-action-button-active');
-        btn.dataset.copyState = 'failed';
-
-        ToolboxShell.appendLog(
-          `[COPY_LAST][BUTTON_STATE] state=failed reason=${reason || '-'}`,
-        );
-
-        return;
-      }
-
-      const copyLastIdleText = '复制最后回复';
-      markUploadActionButtonStableLabel(btn, copyLastIdleText);
-      btn.textContent = getStableButtonText(btn, { text: copyLastIdleText }) || copyLastIdleText;
-      btn.title = copyLastIdleText;
-      btn.classList.remove('cgpt-action-button-active');
-      btn.classList.add('cgpt-copy-last-idle');
-      btn.dataset.copyState = 'idle';
     }
 
     function resetCopyLastButtonSoon(delay = 900) {
@@ -27460,7 +28212,11 @@
       copyLastButtonResetTimer = window.setTimeout(() => {
         copyLastButtonResetTimer = 0;
         setCopyLastButtonState('idle', 'reset-after-copy');
-        renderUploadButtonsOnly();
+        requestUnifiedButtonRender('copy-last-reset-after-copy', {
+          force: false,
+          heavy: false,
+          immediate: false,
+        });
       }, Math.max(300, Number(delay) || 900));
     }
 
@@ -27523,7 +28279,11 @@
       copyLastMessageWaiting = true;
       setCopyLastTaskPhase('waiting', `copy-only:${String(source || '-')}`);
       setCopyLastButtonState('running', `copy-only:${String(source || '-')}`);
-      renderUploadButtonsOnly();
+      requestUnifiedButtonRender(`copy-last-waiting:${String(source || '-')}`, {
+        force: false,
+        heavy: false,
+        immediate: false,
+      });
 
       if (typeof markLatestAssistantMessageCacheDirty === 'function') {
         markLatestAssistantMessageCacheDirty();
@@ -27540,7 +28300,11 @@
         copyLastMessageWaiting = false;
         setCopyLastTaskPhase('copying', 'copying');
         setCopyLastButtonState('running', 'copying');
-        renderUploadButtonsOnly();
+        requestUnifiedButtonRender('copy-last-copying', {
+          force: false,
+          heavy: false,
+          immediate: false,
+        });
 
         const waitCopyResult = await waitAndCopyLatestAssistant({
           source,
@@ -27566,7 +28330,11 @@
           setCopyLastTaskPhase('failed', reason);
           setCopyLastButtonState('failed', reason);
           resetCopyLastButtonSoon(1600);
-          renderUploadButtonsOnly();
+          requestUnifiedButtonRender(`copy-last-failed:${reason}`, {
+            force: false,
+            heavy: false,
+            immediate: false,
+          });
           return false;
         }
 
@@ -27575,7 +28343,11 @@
         setCopyLastTaskPhase('success', 'copy-only-ok');
         setCopyLastButtonState('success', 'copy-only-ok');
         resetCopyLastButtonSoon(900);
-        renderUploadButtonsOnly();
+        requestUnifiedButtonRender('copy-last-success', {
+          force: false,
+          heavy: false,
+          immediate: false,
+        });
 
         ToolboxShell.appendLog(
           `[COPY_LAST_REPLY][done] chars=${waitCopyResult.chars || 0}`,
@@ -27597,7 +28369,11 @@
         setCopyLastTaskPhase('failed', errText);
         setCopyLastButtonState('failed', errText);
         resetCopyLastButtonSoon(1600);
-        renderUploadButtonsOnly();
+        requestUnifiedButtonRender(`copy-last-failed:${errText}`, {
+          force: false,
+          heavy: false,
+          immediate: false,
+        });
         return false;
       } finally {
         const resetDelay = copyLastReplyTaskStatus === 'success' ? 800 : 1200;
@@ -27611,7 +28387,11 @@
           copyLastMessageTaskSource = '';
           copyLastMessageWaiting = false;
           setCopyLastTaskPhase('idle', 'reset-after-copy');
-          renderUploadButtonsOnly();
+          requestUnifiedButtonRender('copy-last-reset-finally', {
+            force: false,
+            heavy: false,
+            immediate: false,
+          });
         }, resetDelay);
       }
     }
@@ -28305,10 +29085,17 @@
         };
       }
 
-      const sendButton = typeof findRealChatGPTSendButton === 'function'
-        ? findRealChatGPTSendButton()
-        : null;
+      invalidateRealSendButtonCache('before-send-message-click');
+      const sendButton = findSendButton({
+        reason: 'send-message-click:user-click',
+        force: true,
+        silent: false,
+        cacheTtlMs: 0,
+      });
       if (!sendButton) {
+        ToolboxShell.appendLog(
+          `[SEND_TASK][REAL_SEND_BUTTON_MISSING] reason=composer-direct-send source=${source}`,
+        );
         ToolboxShell.appendLog(
           `[COMPOSER_DIRECT_SEND][SEND_BUTTON_NOT_FOUND] source=${source}`,
         );
@@ -28329,6 +29116,7 @@
       }
 
       sendButton.click();
+      invalidateRealSendButtonCache('after-send-message-click');
 
       await sleepMs(300);
 
@@ -28342,7 +29130,11 @@
       const authorityForDirectSend = getToolboxStatusAuthoritySnapshot(`composer-direct-send-verify:${source || '-'}`);
       const assistantBusy = authorityForDirectSend.replyBusy === true
         || authorityForDirectSend.shouldWaitReplyByTopStatus === true;
-      const stopButton = document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
+      const stopButton = findSendButton({
+        reason: 'authority-snapshot:real-stop-button-probe',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
 
       if (!afterText.trim() || assistantBusy || stopButton) {
         ToolboxShell.appendLog(
@@ -29068,9 +29860,11 @@
       const helperBtn = (typeof findUploadComposerSendButton === 'function')
         ? findUploadComposerSendButton()
         : null;
-      const directBtn = typeof document !== 'undefined'
-        ? document.querySelector('button#composer-submit-button, button[data-testid="send-button"]')
-        : null;
+      const directBtn = findSendButton({
+        reason: 'resolve-composer-send-click-state',
+        silent: true,
+        cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+      });
       const btn = helperBtn instanceof HTMLButtonElement
         ? helperBtn
         : (directBtn instanceof HTMLButtonElement ? directBtn : null);
@@ -29556,10 +30350,14 @@
           state.copyContinueTask.phase = 'idle';
           state.copyContinueTask.runId = '';
         }
-        if (btn) {
-          setCopyContinueButtonBusy(btn, false);
-        }
-        renderUploadButtonsOnly({ buttonTasksReason: 'copy-continue-finally' });
+        setCopyContinueButtonBusy(btn, false, {
+          reason: 'copy-continue-finally',
+        });
+        requestManagedButtonVmRender('copy-continue-finally', {
+          force: true,
+          immediate: false,
+          heavy: false,
+        });
       }
     }
 
@@ -29992,49 +30790,53 @@
     }
 
     function paintCopyHotkeyOnceButtonRunningNow(btn, reason = '-') {
-      if (!(btn instanceof HTMLButtonElement)) {
-        return false;
+      /*
+       * 状态统一收口：
+       * 本函数保留为兼容入口，但不再直接修改按钮 DOM。
+       * 原来的 textContent / disabled / classList / dataset phase 写法会绕过 ButtonTasks -> Snapshot -> VM -> ButtonState，
+       * 导致左上角状态正确但按钮颜色、文字、disabled 状态被污染。
+       */
+      const reasonText = String(reason || '-').trim() || '-';
+      const task = ensureCopyHotkeyOnceTask();
+      task.phase = 'waiting_reply';
+      task.running = true;
+      task.action = COPY_HOTKEY_ONCE_ACTION;
+      task.taskKey = COPY_HOTKEY_ONCE_TASK_KEY;
+      task.ownerButtonId = COPY_HOTKEY_ONCE_OWNER_BUTTON_ID;
+      task.cancelRequested = false;
+      task.lastReason = `immediate-state-only:${reasonText}`;
+      if (!task.runId) {
+        task.runId = createUploadTaskRunId('copy_hotkey_once');
       }
-      const idleLabel = (
-        typeof getCopyAndHotkeyButtonLabel === 'function'
-          ? getCopyAndHotkeyButtonLabel()
-          : String(btn.dataset.idleLabel || btn.textContent || '复制+快捷键').trim()
-      ) || '复制+快捷键';
-      markUploadActionButtonStableLabel(btn, idleLabel);
-      const stableText = getStableButtonText(btn, { text: idleLabel }) || idleLabel;
-      btn.dataset.busy = '1';
-      btn.dataset.cgptTaskPhase = 'waiting_reply';
-      btn.dataset.cgptButtonPhase = 'waiting_reply';
-      btn.dataset.cgptRuntimeAction = 'cancel';
-      btn.dataset.cgptButtonAction = 'cancel';
-      btn.dataset.cgptCopyHotkeyImmediatePaint = '1';
-      btn.disabled = false;
-      btn.textContent = stableText;
-      btn.dataset.cgptStatusText = '等待回复后复制';
-      btn.title = '正在等待回复完成；再次点击将取消本次复制+快捷键任务';
-      btn.setAttribute('aria-busy', 'true');
-      btn.classList.remove(
-        'cgpt-upload-idle',
-        'cgpt-btn-idle',
-        'cgpt-btn-disabled',
-        'cgpt-btn-failed',
-        'cgpt-upload-failed',
-        'cgpt-upload-success',
-      );
-      btn.classList.add(
-        'danger',
-        'cgpt-btn-danger',
-        'cgpt-btn-stop',
-        'cgpt-btn-busy',
-        'cgpt-btn-waiting-danger',
-        'cgpt-action-running',
-        'cgpt-action-button-active',
-      );
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(
-          `[COPY_HOTKEY_ONCE][IMMEDIATE_BUTTON_RUNNING] id=${btn.id || '-'} reason=${reason || '-'} text=${String(btn.textContent || '').trim()}`,
+      if (!task.startedAt) {
+        task.startedAt = Date.now();
+        copyHotkeyOnceTaskStartedAt = task.startedAt;
+      }
+      copyHotkeyOnceTaskRunning = true;
+      setGlobalButtonTaskPhaseOnly('copyHotkeyOnce', 'waiting_reply', `copy-hotkey-immediate:${reasonText}`, {
+        runId: task.runId || '',
+        cancelRequested: false,
+        action: COPY_HOTKEY_ONCE_ACTION,
+        ownerButtonId: COPY_HOTKEY_ONCE_OWNER_BUTTON_ID,
+      });
+      if (btn) {
+        logManagedButtonDomBypassBlocked(
+          btn,
+          'paintCopyHotkeyOnceButtonRunningNow',
+          'state-only; DOM render delegated to UploadButtonVm.applyUploadButtonViewState',
         );
       }
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_ONCE][IMMEDIATE_STATE_ONLY] id=${btn && btn.id ? btn.id : '-'} phase=waiting_reply reason=${reasonText}`,
+        );
+      }
+      requestManagedButtonVmRender(`copy-hotkey-once:immediate-state-only:${reasonText}`, {
+        force: true,
+        immediate: true,
+        heavy: false,
+        userAction: true,
+      });
       return true;
     }
 
@@ -30296,6 +31098,9 @@
           }
           task.lastError = errText;
           finishCopyHotkeyOnceTask('failed', runId, sourceText);
+          ToolboxShell.appendLog(
+            `[COPY_HOTKEY][TERMINAL_FAIL] source=${sourceText} reason=${failReason} detail=${errText} copied=1 hotkeySent=0`,
+          );
           return {
             ok: false,
             reason: failReason,
@@ -30304,6 +31109,7 @@
             hotkeySent: false,
             continueSent: false,
             assistantDoneSignal: false,
+            terminal: true,
           };
         }
 
@@ -35893,6 +36699,7 @@
         || snapshotOpts.buttonTasksReason
         || 'buildUploadButtonRenderSnapshot',
       ).trim() || 'buildUploadButtonRenderSnapshot';
+      clearStaleWaitingSendWhenComposerEmpty(`before-build-upload-button-snapshot:${snapshotReason}`);
       const forceSnapshot = !!(
         snapshotOpts.force === true
         || snapshotOpts.heavy === true
@@ -35971,6 +36778,7 @@
         recoverClosedLoopIdleRunningState(snapshotReason);
       }
       const runtime = getUnifiedRuntimeStatus(snapshotReason);
+      clearStaleWaitingSendWhenComposerEmpty(`after-unified-runtime-status:${snapshotReason}`);
       const authoritySnapshot = getToolboxStatusAuthoritySnapshot(snapshotReason, {
         runtimeSnapshot: runtime,
         forceAuthority: forceSnapshot,
@@ -37657,161 +38465,234 @@
 
     function setUploadButtonState(stateName, reason = '') {
       const stateText = String(stateName || 'idle').trim().toLowerCase() || 'idle';
+
       const normalizedUploadTaskPhase = normalizeUploadTaskPhaseInput(
         state.uploadTask && state.uploadTask.phase ? state.uploadTask.phase : 'idle',
         stateText,
         `setUploadButtonState:${reason || '-'}`,
       );
-      // 统一入口：禁止在正常链路直接写 DOM；只更新权威 uploadTask.phase，然后触发统一渲染。
-      setAuthoritativeUploadTaskState({ phase: normalizedUploadTaskPhase }, `setUploadButtonState:${reason || '-'}`);
+
+      /*
+       * 统一状态收口：
+       * 本函数不再直接修改上传按钮 DOM。
+       * 只更新 authoritative uploadTask，然后触发统一渲染。
+       */
+      setAuthoritativeUploadTaskState(
+        { phase: normalizedUploadTaskPhase },
+        `setUploadButtonState:${reason || '-'}`,
+      );
+
       const reasonText = String(reason || '-').trim() || '-';
+
       const isRuntimeResetReason =
         /(?:^|:)reset-upload-runtime(?::|$)/i.test(reasonText)
         || /upload-runtime-idle-after-reset/i.test(reasonText)
         || /setUploadButtonState:reset-upload-runtime/i.test(reasonText);
+
       if (isRuntimeResetReason) {
         ToolboxShell.appendLog(
-          `[UPLOAD_BUTTON][STATE_NO_RENDER_FOR_RUNTIME_RESET] phase=${stateText} reason=${reasonText}`,
+          `[UPLOAD_BUTTON][STATE_NO_RENDER_FOR_RUNTIME_RESET] phase=${stateText} normalizedPhase=${normalizedUploadTaskPhase} reason=${reasonText}`,
         );
         return;
       }
+
       if (uploadButtonRenderDepth > 0 || uploadButtonsRendering) {
-        uploadButtonRenderPendingReason = `setUploadButtonState:${reason || '-'}`;
+        uploadButtonRenderPendingReason = `setUploadButtonState:${reasonText}`;
+
         ToolboxShell.appendLog(
-          `[UPLOAD_BUTTON][STATE_DEFERRED_RENDER] phase=${stateText} reason=${reason || '-'} depth=${uploadButtonRenderDepth}`,
+          `[UPLOAD_BUTTON][STATE_DEFERRED_RENDER] phase=${stateText} normalizedPhase=${normalizedUploadTaskPhase} reason=${reasonText} depth=${uploadButtonRenderDepth}`,
         );
-        return;
-      }
-      scheduleRenderUpload(`setUploadButtonState:${reason || '-'}`);
 
-      // fallback：仅在 VM / ButtonState 不存在时才允许走旧 DOM 写入（避免覆盖新渲染链路）。
-      if (typeof UploadButtonVm !== 'undefined' && typeof ButtonState !== 'undefined') {
-        ToolboxShell.appendLog(`[UPLOAD_BUTTON][STATE] phase=${stateText} reason=${reason || '-'} via=vm`);
         return;
       }
 
-      // Hard guard: legacy DOM path should not run in normal builds.
-      console.error('[UPLOAD_BUTTON][LEGACY_DOM_SHOULD_NOT_RUN]', { stateText, reason });
       ToolboxShell.appendLog(
-        `[UPLOAD_BUTTON][LEGACY_DOM_SHOULD_NOT_RUN] phase=${stateText} reason=${reason || '-'}`,
+        `[UPLOAD_BUTTON][STATE_UNIFIED] phase=${stateText} normalizedPhase=${normalizedUploadTaskPhase} reason=${reasonText}`,
       );
 
-      const btn = document.querySelector(UploadSelectors.startBtn);
-      if (!(btn instanceof HTMLButtonElement)) {
-        return;
+      requestUnifiedButtonRender(`setUploadButtonState:${reasonText}`, {
+        force: normalizedUploadTaskPhase === 'uploading',
+        heavy: false,
+        immediate: false,
+      });
+    }
+
+    function normalizeLegacySendButtonStateName(stateName) {
+      const text = String(stateName || 'idle').trim().toLowerCase();
+
+      if (text === 'sending' || text === 'send' || text === 'clicking_send') {
+        return 'sending';
       }
 
-      if (stateText === 'uploading') {
-        btn.dataset.cgptButtonPhase = 'uploading';
-        btn.setAttribute('aria-busy', 'true');
-        markUploadActionButtonStableLabel(btn, '开始上传');
-        btn.textContent = getStableButtonText(btn, { text: '开始上传' }) || '开始上传';
-        btn.dataset.cgptStatusText = '上传中';
-        btn.title = '文件正在上传中';
-        btn.setAttribute('data-danger-enter-block', '1');
-      } else {
-        btn.dataset.cgptButtonPhase = 'idle';
-        btn.setAttribute('aria-busy', 'false');
-        markUploadActionButtonStableLabel(btn, '开始上传');
-        btn.textContent = getStableButtonText(btn, { text: '开始上传' }) || '开始上传';
-        delete btn.dataset.cgptStatusText;
-        btn.title = '上传当前分组全部可上传文件（点击文件行可单独上传当前文件）';
-        btn.removeAttribute('data-danger-enter-block');
+      if (
+        text === 'waiting-reply'
+        || text === 'waiting_reply'
+        || text === 'sent_waiting_response'
+        || text === 'reply'
+      ) {
+        return 'waiting_reply';
       }
 
-      btn.classList.toggle('cgpt-btn-busy', stateText === 'uploading');
-      btn.classList.remove('danger', 'cgpt-wait-send-cancel', 'cgpt-send-danger', 'cgpt-btn-waiting-danger');
-      delete btn.dataset.waitDanger;
-      delete btn.dataset.waitDangerReason;
-      if (typeof clearButtonLongWaitDangerTimer === 'function') {
-        clearButtonLongWaitDangerTimer(btn, reason || 'upload-state');
+      if (
+        text === 'cancelable-waiting'
+        || text === 'waiting'
+        || text === 'waiting-send'
+        || text === 'waiting_send'
+        || text === 'checking'
+      ) {
+        return 'waiting_send';
       }
-      ToolboxShell.appendLog(`[UPLOAD_BUTTON][STATE] phase=${stateText} reason=${reason || '-'} via=legacy-dom`);
+
+      if (text === 'cancelling' || text === 'canceling' || text === 'stopping_response') {
+        return 'cancelling';
+      }
+
+      if (text === 'cancelled' || text === 'canceled') {
+        return 'cancelled';
+      }
+
+      if (text === 'failed' || text === 'fail' || text === 'error') {
+        return 'failed';
+      }
+
+      return 'idle';
     }
 
     function applyLegacySendButtonView(stateName, reason = '') {
       const legacyReason = String(reason || '').trim() || 'legacy';
+      const normalizedPhase = normalizeLegacySendButtonStateName(stateName);
+
+      /*
+       * 统一状态收口：
+       * 本函数保留为兼容入口，但不再直接修改发送按钮 DOM。
+       * 只写 state.sendTask / ButtonTasks，然后触发统一渲染。
+       */
       console.warn(
-        '[ChatGPT toolbox] applyLegacySendButtonView is deprecated; use UploadButtonVm.applyUploadButtonViewState instead',
-        { stateName, reason: legacyReason },
+        '[ChatGPT toolbox] applyLegacySendButtonView is deprecated; state-only compatibility wrapper is used',
+        { stateName, reason: legacyReason, normalizedPhase },
       );
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[SEND_BUTTON][LEGACY_SET_STATE] state=${String(stateName || 'idle')} reason=${legacyReason}`,
+          `[SEND_BUTTON][LEGACY_STATE_ONLY] state=${String(stateName || 'idle')} phase=${normalizedPhase} reason=${legacyReason}`,
         );
       }
 
-      const btn = document.querySelector(UploadSelectors.sendMessageBtn);
-      if (!(btn instanceof HTMLButtonElement) || typeof setToolboxButtonState !== 'function') {
-        return;
-      }
+      const currentSendTask = state.sendTask && typeof state.sendTask === 'object'
+        ? state.sendTask
+        : {};
 
-      const stateText = String(stateName || 'idle');
-      const legacyUiMap = {
-        idle: {
-          phase: ButtonPhase.IDLE,
-          text: '发送消息',
-          allowCancel: false,
-          ariaBusy: false,
+      setAuthoritativeSendTaskState(
+        {
+          phase: normalizedPhase,
+          action: currentSendTask.action || 'send-message',
+          ownerAction: currentSendTask.ownerAction || currentSendTask.action || 'send-message',
+          ownerButtonId: currentSendTask.ownerButtonId || 'cgpt-send-message-once',
+          visualOwnerAction: currentSendTask.visualOwnerAction || currentSendTask.ownerAction || currentSendTask.action || 'send-message',
+          visualOwnerButtonId: currentSendTask.visualOwnerButtonId || currentSendTask.ownerButtonId || 'cgpt-send-message-once',
+          cancelRequested: normalizedPhase === 'cancelling' || normalizedPhase === 'cancelled',
         },
-        sending: {
-          phase: ButtonPhase.SENDING,
-          text: '发送中',
-          allowCancel: true,
-          ariaBusy: true,
-        },
-        'waiting-reply': {
-          phase: ButtonPhase.WAITING_REPLY,
-          text: '等待回复',
-          allowCancel: true,
-          ariaBusy: true,
-        },
-        cancelling: {
-          phase: ButtonPhase.CANCELLING,
-          text: '取消中',
-          allowCancel: false,
-          ariaBusy: true,
-        },
-        'cancelable-waiting': {
-          phase: ButtonPhase.WAITING_SEND,
-          text: '等待发送',
-          allowCancel: true,
-          ariaBusy: true,
-        },
-        waiting: {
-          phase: ButtonPhase.WAITING_SEND,
-          text: '等待发送',
-          allowCancel: true,
-          ariaBusy: true,
-        },
-        checking: {
-          phase: ButtonPhase.CHECKING,
-          text: '检查中',
-          allowCancel: false,
-          ariaBusy: true,
-        },
-      };
-      const ui = legacyUiMap[stateText] || legacyUiMap.idle;
-
-      delete btn.dataset.waitDanger;
-      delete btn.dataset.waitDangerReason;
-      if (typeof clearButtonLongWaitDangerTimer === 'function') {
-        clearButtonLongWaitDangerTimer(btn, reason || 'send-state');
-      }
-
-      btn.disabled = false;
-      setToolboxButtonState(btn, {
-        phase: ui.phase,
-        text: ui.text,
-        title: ui.text,
-        allowCancel: ui.allowCancel,
-        ariaBusy: ui.ariaBusy,
-        reason: reason || `legacy-send-state:${stateText}`,
-      });
-
-      ToolboxShell.appendLog(
-        `[SEND_BUTTON][STATE] state=${stateText} reason=${reason || '-'} text=${String(btn.textContent || '').trim() || '-'}`,
+        `legacy-send-button-view:${legacyReason}`,
       );
+
+      requestUnifiedButtonRender(`legacy-send-button-view:${normalizedPhase}:${legacyReason}`, {
+        force: normalizedPhase !== 'idle',
+        heavy: false,
+        immediate: false,
+      });
+    }
+
+    function requestManagedButtonVmRender(reason = '', options = {}) {
+      const reasonText = String(reason || 'managed-button-render').trim() || 'managed-button-render';
+      const opts = options && typeof options === 'object' ? options : {};
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_RENDER][REQUEST_VM] reason=${reasonText} force=${opts.force === true ? 1 : 0} immediate=${opts.immediate === true ? 1 : 0} heavy=${opts.heavy === true ? 1 : 0}`,
+        );
+      }
+      if (typeof requestUnifiedButtonRender === 'function') {
+        requestUnifiedButtonRender(reasonText, {
+          force: opts.force === true,
+          heavy: opts.heavy === true,
+          immediate: opts.immediate === true,
+          userAction: opts.userAction === true,
+        });
+        return true;
+      }
+      if (typeof renderUploadButtonsOnly === 'function') {
+        renderUploadButtonsOnly({
+          buttonTasksReason: reasonText,
+          force: opts.force === true,
+          heavy: opts.heavy === true,
+          immediate: opts.immediate === true,
+          userAction: opts.userAction === true,
+        });
+        return true;
+      }
+      console.error('[BUTTON_RENDER][REQUEST_VM_FAILED] render function not found', {
+        reason: reasonText,
+        options: opts,
+      });
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[BUTTON_RENDER][REQUEST_VM_FAILED] reason=${reasonText}`);
+      }
+      return false;
+    }
+
+    function setGlobalButtonTaskPhaseOnly(taskName, phase, reason = '', extra = {}) {
+      const taskKey = String(taskName || '').trim();
+      const phaseText = String(phase || 'idle').trim().toLowerCase() || 'idle';
+      const reasonText = String(reason || 'state-only').trim() || 'state-only';
+      const extraObj = extra && typeof extra === 'object' ? extra : {};
+      if (!taskKey) {
+        console.error('[BUTTON_TASK][SET_PHASE_FAILED] empty taskName', {
+          taskName,
+          phase,
+          reason,
+        });
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[BUTTON_TASK][SET_PHASE_FAILED] taskName=- phase=${phaseText} reason=${reasonText}`,
+          );
+        }
+        return false;
+      }
+      if (typeof ButtonTasks !== 'undefined' && ButtonTasks && typeof ButtonTasks.setTaskPhase === 'function') {
+        ButtonTasks.setTaskPhase(taskKey, phaseText, reasonText, extraObj);
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[BUTTON_TASK][GLOBAL_PHASE_ONLY] task=${taskKey} phase=${phaseText} reason=${reasonText}`,
+          );
+        }
+        return true;
+      }
+      console.error('[BUTTON_TASK][SET_PHASE_FAILED] ButtonTasks.setTaskPhase missing', {
+        taskName: taskKey,
+        phase: phaseText,
+        reason: reasonText,
+      });
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_TASK][SET_PHASE_FAILED] task=${taskKey} phase=${phaseText} reason=${reasonText} error=ButtonTasksMissing`,
+        );
+      }
+      return false;
+    }
+
+    function logManagedButtonDomBypassBlocked(button, source = '', detail = '') {
+      const id = button && button.id ? String(button.id) : '-';
+      const sourceText = String(source || 'unknown').trim() || 'unknown';
+      const detailText = String(detail || '').trim();
+      console.warn('[BUTTON_DOM][BYPASS_BLOCKED]', {
+        id,
+        source: sourceText,
+        detail: detailText,
+      });
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_DOM][BYPASS_BLOCKED] id=${id} source=${sourceText} detail=${detailText || '-'}`,
+        );
+      }
     }
 
     function applyStartUploadButtonState(button, options = {}) {
@@ -37845,18 +38726,18 @@
             reason: `${reason}:module-not-ready-keep-idle-color`,
           });
         }
-        button.textContent = '开始上传';
-        button.disabled = true;
-        button.classList.remove(
-          'cgpt-btn-busy',
-          'cgpt-btn-danger',
-          'cgpt-btn-running',
-          'cgpt-action-running',
-          'cgpt-action-button-active',
-        );
-        button.dataset.cgptButtonPhase = 'idle';
-        button.setAttribute('aria-busy', 'false');
-        return true;
+        console.error('[UPLOAD_BUTTON][STATE_APPLY_FAILED] setToolboxButtonState missing', {
+          id: button && button.id ? button.id : '-',
+          reason,
+          moduleReady: state.moduleReady,
+          moduleInitState: getUploadModuleInitState(),
+        });
+        if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(
+            `[UPLOAD_BUTTON][STATE_APPLY_FAILED] id=${button && button.id ? button.id : '-'} reason=${reason} error=setToolboxButtonStateMissing`,
+          );
+        }
+        return false;
       }
 
       if (typeof UploadButtonVm !== 'undefined' && typeof UploadButtonVm.applyUploadButtonViewState === 'function') {
@@ -38391,11 +39272,20 @@
           title: disabledTitle,
           disabled: true,
           reason,
+          preserveBaseColorWhenDisabled: true,
         });
-        if (disabledResult && disabledResult.button) {
-          disabledResult.button.classList.add('cgpt-btn-disabled-visual');
+        if (typeof ButtonState !== 'undefined' && ButtonState && typeof ButtonState.applyDisabledVisualOnlyState === 'function') {
+          ButtonState.applyDisabledVisualOnlyState(button, true, reason);
         } else {
-          button.classList.add('cgpt-btn-disabled-visual');
+          console.error('[SEND_MESSAGE_BUTTON][DISABLED_VISUAL_FAILED] ButtonState.applyDisabledVisualOnlyState missing', {
+            id: button && button.id ? button.id : '-',
+            reason,
+          });
+          if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(
+              `[SEND_MESSAGE_BUTTON][DISABLED_VISUAL_FAILED] id=${button && button.id ? button.id : '-'} reason=${reason} error=applyDisabledVisualOnlyStateMissing`,
+            );
+          }
         }
         finalizeSendButtonStateFromTask(reason);
         return disabledResult;
@@ -38403,9 +39293,9 @@
 
       button.dataset.action = 'send-message';
       setSendMessageButtonVisualState(button, false, '');
-      button.disabled = false;
-      button.classList.remove('cgpt-btn-disabled-visual');
-
+      if (typeof ButtonState !== 'undefined' && ButtonState && typeof ButtonState.applyDisabledVisualOnlyState === 'function') {
+        ButtonState.applyDisabledVisualOnlyState(button, false, reason);
+      }
       const sendButtonText = canSendNowForButton ? '发送消息' : '发送消息';
       const idleResult = setButtonIdle(button, sendButtonText, {
         title: '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
@@ -38719,9 +39609,11 @@
         }
 
         if (allowRenderMaintenance) {
+          clearStaleWaitingSendWhenComposerEmpty(`before-render-upload-buttons:${renderReason}`);
           healStaleUploadRunningLockIfNeeded(renderReason);
           healStaleSendUiStateIfNeeded(renderReason);
           maybeHealStaleWaitingReplyState(renderReason);
+          clearStaleWaitingSendWhenComposerEmpty(`after-heal-waiting-reply:${renderReason}`);
           reconcilePendingSendTaskAfterExternalNativeSend(renderReason);
           maybeReconcileSendCopyHotkeyWaitingReply(renderReason);
           recoverClosedLoopIdleRunningState(renderReason);
@@ -39257,7 +40149,7 @@
         if (shouldRunClosedLoopDiagnostics('after-render-upload-buttons')) {
           rebindClosedLoopContinueUi(rootElRef || document, 'after-render-upload-buttons');
         }
-        bindCopyLastReplyButtonDirectClick(rootElRef || document, 'after-render-upload-buttons');
+        bindCopyLastMessageButton('after-render-upload-buttons');
         scheduleAuditToolboxActionGridLayout(renderReason);
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
@@ -40767,12 +41659,12 @@
       try {
         if (typeof ComposerApi !== 'undefined' && ComposerApi && typeof ComposerApi.findSendButton === 'function') {
           sendButton = ComposerApi.findSendButton({ silent: true, reason: `heal-waiting-reply:${reason}` });
-        } else if (typeof findSendButton === 'function') {
-          sendButton = findSendButton({ silent: true, reason: `heal-waiting-reply:${reason}` });
         } else {
-          sendButton = document.querySelector(
-            'button#composer-submit-button, button[data-testid="send-button"]',
-          );
+          sendButton = findSendButton({
+            reason: `heal-waiting-reply:${reason}`,
+            silent: true,
+            cacheTtlMs: REAL_SEND_BUTTON_CACHE_TTL_MS,
+          });
         }
       } catch (error) {
         const errText = error && error.message ? error.message : String(error);
@@ -40988,6 +41880,83 @@
 
     let lastWaitingReplyHealSkipAt = 0;
     let lastWaitingReplyHealSkipReason = '';
+
+    function clearStaleWaitingSendWhenComposerEmpty(reason) {
+      const reasonText = String(reason || '-').trim() || '-';
+      const authority = getToolboxAuthorityState(`clear-stale-waiting-send:${reasonText}`, {
+        cacheTtlMs: 0,
+      });
+
+      const sendPhase = sendMessageTaskState && sendMessageTaskState.phase
+        ? String(sendMessageTaskState.phase).trim().toLowerCase()
+        : '';
+
+      const sendRunning = !!(sendMessageTaskState && sendMessageTaskState.running);
+
+      const composerTextLen = Number.isFinite(Number(authority && authority.composer && authority.composer.textLen))
+        ? Number(authority.composer.textLen)
+        : 0;
+
+      const responseState = authority && authority.raw && authority.raw.responseState
+        ? String(authority.raw.responseState).trim().toLowerCase()
+        : '';
+
+      const realSendButtonFound = !!(authority && authority.composer && authority.composer.hasRealSendButton);
+      const realSendReady = !!(authority && authority.composer && authority.composer.realSendButtonReady);
+
+      const stale =
+        sendRunning
+        && ['waiting_send', 'waiting_button', 'waiting_composer', 'preparing'].includes(sendPhase)
+        && composerTextLen === 0
+        && responseState === 'idle'
+        && !realSendButtonFound
+        && !realSendReady;
+
+      if (!stale) {
+        return false;
+      }
+
+      console.warn('[SEND_TASK][CLEAR_STALE_WAITING_SEND]', {
+        reason: reasonText,
+        sendPhase,
+        composerTextLen,
+        responseState,
+        realSendButtonFound,
+        realSendReady,
+        oldState: Object.assign({}, sendMessageTaskState),
+      });
+
+      ToolboxShell.appendLog(
+        `[SEND_TASK][CLEAR_STALE_WAITING_SEND] reason=${reasonText} sendPhase=${sendPhase} `
+        + `composerTextLen=${composerTextLen} responseState=${responseState}`,
+      );
+
+      sendMessageTaskState.running = false;
+      sendMessageTaskState.phase = SEND_MESSAGE_PHASES.IDLE;
+      sendMessageTaskState.action = 'send-message';
+      sendMessageTaskState.plan = buildSendTaskPlanFromAction('send-message');
+      sendMessageTaskState.ownerButtonId = '';
+      sendMessageTaskState.runId = '';
+      sendMessageTaskState.abortController = null;
+      sendMessageTaskState.lastReason = `clear-stale-waiting-send:${reasonText}`;
+      sendMessageTaskState.hasClickedNativeSend = false;
+      sendMessageTaskState.nativeSendClicked = false;
+      sendMessageTaskState.nativeSendClickedAt = 0;
+      sendMessageTaskState.sentAt = 0;
+      sendMessageTaskState.updatedAt = Date.now();
+
+      setAuthoritativeSendTaskState(
+        { phase: 'idle', runId: '', cancelRequested: false },
+        `clear-stale-waiting-send:${reasonText}`,
+      );
+
+      state.messageSending = false;
+      state.waitingSend = false;
+      state.autoSendWaiting = false;
+      state.waitingRealSendButton = false;
+
+      return true;
+    }
 
     function maybeHealStaleWaitingReplyState(reason = '-') {
       const reasonText = String(reason || '-').trim() || '-';
@@ -50066,6 +51035,10 @@
         return String(configAction || '').trim();
       }
 
+      if (button.id === 'cgpt-copy-last-message-scroll-bottom') {
+        return 'copy-only';
+      }
+
       const resolvedAction = (
         typeof ButtonState !== 'undefined'
         && typeof ButtonState.resolveButtonAction === 'function'
@@ -50398,7 +51371,13 @@
       },
       'copy-only': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
-        void runCopyAction('copy-only', { source: src }).catch((err) => {
+        console.info('[ACTION_DISPATCH][COPY_ONLY_HIT]', {
+          raw: 'copy-only',
+          resolvedAction: 'copy-only',
+          source: src,
+          id: ctx && ctx.button && ctx.button.id ? ctx.button.id : '-',
+        });
+        void runCopyLastMessageOnly(`delegated-copy-only:${src}`).catch((err) => {
           const errText = formatToolboxError(err);
           console.error('[UPLOAD_UI_ACTION][copy-only:failed]', err);
           setStatus(`复制最后回复失败：${errText}`, 'error');
@@ -50408,7 +51387,13 @@
       },
       'copy-last-reply': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
-        void runCopyAction('copy-only', { source: src }).catch((err) => {
+        console.info('[ACTION_DISPATCH][COPY_ONLY_HIT]', {
+          raw: 'copy-last-reply',
+          resolvedAction: 'copy-only',
+          source: src,
+          id: ctx && ctx.button && ctx.button.id ? ctx.button.id : '-',
+        });
+        void runCopyLastMessageOnly(`delegated-copy-only:${src}`).catch((err) => {
           const errText = formatToolboxError(err);
           console.error('[UPLOAD_UI_ACTION][copy-last-reply:failed]', err);
           setStatus(`复制最后回复失败：${errText}`, 'error');
@@ -51749,8 +52734,20 @@
           );
           continue;
         }
+        if (
+          def.action === 'copy-log'
+          && pointerCopyLastBtn
+        ) {
+          continue;
+        }
         const button = target.closest(selector);
         if (!button) {
+          continue;
+        }
+        if (
+          button.id === 'cgpt-copy-last-message-scroll-bottom'
+          && def.action !== 'copy-only'
+        ) {
           continue;
         }
 
@@ -51836,9 +52833,13 @@
       }
 
       const target = event && event.target instanceof Element ? event.target : null;
-      const button = target
+      let button = target
         ? target.closest('#cgpt-copy-last-message-scroll-bottom')
         : null;
+
+      if (!(button instanceof HTMLElement)) {
+        button = resolveCopyLastButtonFromPointer(event);
+      }
 
       if (!(button instanceof HTMLElement)) {
         return false;
@@ -51853,6 +52854,7 @@
         }
 
         event.cgptCopyLastHandled = true;
+        event.cgptUploadUiActionHandled = true;
       }
 
       ToolboxShell.appendLog(
@@ -51867,51 +52869,87 @@
         );
       }
 
-      dispatchToolboxActionSafe('copy-only', {
-        button,
-        source,
-        event,
+      void runCopyLastMessageOnly(`direct-copy-last-button:${source}`).catch((err) => {
+        const errText = formatToolboxError(err);
+        console.error('[COPY_LAST][DIRECT_DISPATCH_FAILED]', {
+          source,
+          message: errText,
+          stack: err && err.stack ? err.stack : '',
+        });
+        setStatus(`复制最后回复失败：${errText}`, 'error');
       });
 
       return true;
     }
 
-    function bindCopyLastReplyButtonDirectClick(rootEl, reason = '-') {
-      const root = rootEl || rootElRef || document;
-      let button = root.querySelector
-        ? root.querySelector('#cgpt-copy-last-message-scroll-bottom')
-        : null;
-
-      if (!(button instanceof HTMLElement)) {
-        button = document.querySelector('#cgpt-copy-last-message-scroll-bottom');
-      }
-
-      if (!(button instanceof HTMLElement)) {
-        ToolboxShell.appendLog(
-          `[COPY_LAST_BUTTON][BIND_SKIP] reason=${reason || '-'} detail=missing-button`,
-        );
+    function bindCopyLastMessageButton(reason) {
+      const btn = document.getElementById('cgpt-copy-last-message-scroll-bottom');
+      if (!btn) {
+        console.warn('[COPY_LAST][BIND_SKIP]', {
+          reason,
+          found: 0,
+        });
         return false;
       }
 
-      button.dataset.action = 'copy-only';
-      button.dataset.cgptBaseAction = 'copy-only';
-      button.dataset.uploadUiAction = 'copy-only';
+      btn.dataset.action = 'copy-only';
+      btn.dataset.cgptBaseAction = 'copy-only';
+      btn.dataset.uploadUiAction = 'copy-only';
 
-      if (button.dataset.copyLastDirectClickBound === '1') {
+      if (btn.__cgptCopyLastBound === true) {
+        console.debug('[COPY_LAST][BIND_KEEP]', {
+          reason,
+          id: btn.id,
+          action: btn.getAttribute('data-action') || btn.dataset.action || '',
+        });
         return true;
       }
 
-      button.dataset.copyLastDirectClickBound = '1';
+      btn.__cgptCopyLastBound = true;
 
-      button.addEventListener('click', (clickEvent) => {
-        handleCopyLastReplyButtonClick(clickEvent, 'copy-last-direct-click');
+      btn.addEventListener('click', async function onCopyLastMessageClick(clickEvent) {
+        clickEvent.preventDefault();
+        clickEvent.stopPropagation();
+        if (typeof clickEvent.stopImmediatePropagation === 'function') {
+          clickEvent.stopImmediatePropagation();
+        }
+        clickEvent.cgptCopyLastHandled = true;
+        clickEvent.cgptUploadUiActionHandled = true;
+
+        console.info('[COPY_LAST][CLICK]', {
+          reason,
+          id: btn.id,
+          text: btn.textContent || '',
+          action: btn.getAttribute('data-action') || btn.dataset.action || '',
+          disabled: btn.disabled ? 1 : 0,
+        });
+
+        if (btn.disabled) {
+          console.warn('[COPY_LAST][CLICK_SKIP_DISABLED]', {
+            reason,
+            id: btn.id,
+          });
+          return;
+        }
+
+        await runCopyLastMessageOnly('direct-copy-last-button');
       }, true);
 
+      console.info('[COPY_LAST][BIND_DONE]', {
+        reason,
+        id: btn.id,
+        action: btn.getAttribute('data-action') || btn.dataset.action || '',
+      });
       ToolboxShell.appendLog(
-        `[COPY_LAST_BUTTON][BIND_OK] reason=${reason || '-'} id=${button.id || '-'}`,
+        `[COPY_LAST][BIND_DONE] reason=${reason || '-'} id=${btn.id || '-'}`,
       );
 
       return true;
+    }
+
+    function bindCopyLastReplyButtonDirectClick(rootEl, reason = '-') {
+      void rootEl;
+      return bindCopyLastMessageButton(reason || 'after-render-upload-buttons');
     }
 
     function bindCopyLastDocumentFallbackClick(reason = '-') {
@@ -52177,10 +53215,10 @@
         bindCopyAndHotkeyShortcut();
         bindUploadStartShortcut();
         bindUploadSendShortcut();
+        bindCopyLastDocumentFallbackClick('upload-module-init');
+        bindCopyLastMessageButton('bind-events');
         bindUploadDelegatedClick(rootEl);
         bindUploadCompactActionButtons(rootEl);
-        bindCopyLastReplyButtonDirectClick(rootEl, 'bind-events');
-        bindCopyLastDocumentFallbackClick('upload-module-init');
         rebindClosedLoopContinueUi(rootEl, 'render-upload-actions');
         applyUploadShortcutButtonTitles(rootEl);
         bindUploadGroupChipClickFallback(rootEl, 'bind-events');
@@ -52419,10 +53457,10 @@
       bindCopyAndHotkeyShortcut();
       bindUploadStartShortcut();
       bindUploadSendShortcut();
+      bindCopyLastDocumentFallbackClick('upload-module-init');
+      bindCopyLastMessageButton('bind-events');
       bindUploadDelegatedClick(rootEl);
       bindUploadCompactActionButtons(rootEl);
-      bindCopyLastReplyButtonDirectClick(rootEl, 'bind-events');
-      bindCopyLastDocumentFallbackClick('upload-module-init');
       rebindClosedLoopContinueUi(rootEl, 'mount-upload-module');
       applyUploadShortcutButtonTitles(rootEl);
       bindUploadGroupChipClickFallback(rootEl, 'bind-events');
@@ -52974,7 +54012,7 @@
       ensureUploadClosedLoopActionRow(rootEl);
       logUploadActionRowLayout(rootEl, 'ensure-upload-action-buttons');
       rebindClosedLoopContinueUi(rootEl, 'after-ensure-upload-action-buttons');
-      bindCopyLastReplyButtonDirectClick(rootEl, 'after-render-upload-buttons');
+      bindCopyLastMessageButton('after-render-upload-buttons');
     }
 
     function bindUploadCompactActionButtons(rootEl) {
@@ -54442,6 +55480,7 @@
       startSendMessageFlow,
       triggerSendFromToolbox,
       clearStaleBusySendStateOnHomeReady,
+      clearStaleWaitingSendWhenComposerEmpty,
       shouldPreserveActiveSendTaskOnForeground,
       isSendMessageTaskRunning: () => !!sendMessageTaskState.running,
       isSendFamilyAction,

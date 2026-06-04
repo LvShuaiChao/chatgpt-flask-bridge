@@ -102,8 +102,11 @@ const UploadNativeRuntime = (() => {
   }
 
   async function waitChatGPTNativeUploadSettled(files, options = {}) {
+    const startedAt = Date.now();
+    const reason = String(options.reason || '').trim();
     const timeoutMs = Math.max(60000, Number(options.timeoutMs) || 120000);
     const pollMs = Number(options.pollMs) || 500;
+    const intervalMs = pollMs;
     const stableMs = Math.max(500, Math.min(1500, Number(options.stableMs) || 900));
     const requireSendReady = options.requireSendReady === undefined
       ? true
@@ -116,7 +119,17 @@ const UploadNativeRuntime = (() => {
       ? options.expectedNames
       : buildExpectedNames(files);
     const fileNames = getFileNames(files);
+    const fileCount = (files || []).filter(Boolean).length;
 
+    console.log('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_START]', {
+      timeoutMs,
+      intervalMs,
+      reason: reason || '',
+      fileCount,
+      ts: Date.now(),
+    });
+
+    try {
     if (isCancelled()) {
       return { ok: false, cancelled: true, reason: 'cancelled' };
     }
@@ -144,10 +157,25 @@ const UploadNativeRuntime = (() => {
       }
 
       if (!settled || settled.ok !== true) {
+        console.error('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_TIMEOUT]', {
+          elapsedMs: Date.now() - startedAt,
+          timeoutMs,
+          uploading: true,
+          fileCount,
+          ready: false,
+          reason: reason || '',
+        });
         return { ok: false, reason: 'native-upload-settle-timeout' };
       }
 
       if (!requireSendReady) {
+        console.log('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_OK]', {
+          elapsedMs: Date.now() - startedAt,
+          uploading: false,
+          fileCount,
+          ready: true,
+          reason: reason || '',
+        });
         return { ok: true, reason: 'native-upload-settled-without-send-ready' };
       }
 
@@ -177,6 +205,13 @@ const UploadNativeRuntime = (() => {
         return { ok: false, reason: 'native-upload-send-not-ready' };
       }
 
+      console.log('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_OK]', {
+        elapsedMs: Date.now() - startedAt,
+        uploading: false,
+        fileCount,
+        ready: true,
+        reason: reason || '',
+      });
       return { ok: true, reason: 'native-upload-settled' };
     }
 
@@ -208,6 +243,17 @@ const UploadNativeRuntime = (() => {
           && ComposerCapability.isNativeSendReadyForUpload({ source: 'unified/native-send-ready' })
         )
         : true;
+      const ready = !stillUploading && attachmentPresent && sendReady;
+
+      if (Date.now() - startedAt >= 0) {
+        console.log('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_CHECK]', {
+          elapsedMs: Date.now() - startedAt,
+          uploading: stillUploading,
+          fileCount,
+          ready,
+          reason: reason || '',
+        });
+      }
 
       if (!stillUploading && attachmentPresent && sendReady) {
         await sleepMs(stableMs);
@@ -241,6 +287,13 @@ const UploadNativeRuntime = (() => {
               ? `[UPLOAD_NATIVE][SETTLED] names=${fileNames || '-'}`
               : `[UPLOAD][ATTACHED_ONLY][NATIVE_STABLE_OFF] names=${fileNames || '-'} requireSendReady=0`,
           );
+          console.log('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_OK]', {
+            elapsedMs: Date.now() - startedAt,
+            uploading: false,
+            fileCount,
+            ready: true,
+            reason: reason || '',
+          });
           return {
             ok: true,
             reason: requireSendReady
@@ -253,8 +306,33 @@ const UploadNativeRuntime = (() => {
       await sleepMs(pollMs);
     }
 
+    console.error('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_TIMEOUT]', {
+      elapsedMs: Date.now() - startedAt,
+      timeoutMs,
+      uploading: true,
+      fileCount,
+      ready: false,
+      reason: reason || '',
+    });
     appendRuntimeLog(`[UPLOAD_NATIVE][TIMEOUT] names=${fileNames || '-'} timeoutMs=${timeoutMs}`);
     return { ok: false, reason: 'native-upload-settle-timeout' };
+    } catch (e) {
+      console.error('[UPLOAD_NATIVE_RUNTIME][WAIT_SETTLED_FAILED]', {
+        reason: reason || '',
+        error: e && e.stack ? e.stack : String(e),
+        elapsedMs: Date.now() - startedAt,
+      });
+      return {
+        ok: false,
+        reason: 'wait_upload_settled_exception',
+        error: String(e && e.message ? e.message : e),
+      };
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.UploadNativeRuntime = window.UploadNativeRuntime || {};
+    window.UploadNativeRuntime.waitChatGPTNativeUploadSettled = waitChatGPTNativeUploadSettled;
   }
 
   return {

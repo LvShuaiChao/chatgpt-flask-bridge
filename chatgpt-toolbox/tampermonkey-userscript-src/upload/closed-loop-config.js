@@ -64,7 +64,14 @@
 
     function normalizeClosedLoopAction(action) {
       const key = String(action || '').trim();
-      return key;
+      const normalized = key;
+      console.log('[CLOSED_LOOP_CONFIG][ACTION_NORMALIZED]', {
+        input: action,
+        normalized,
+        source: 'closed-loop-config:normalizeClosedLoopAction',
+        ts: Date.now(),
+      });
+      return normalized;
     }
 
     function getClosedLoopModeFromAction(action) {
@@ -172,10 +179,19 @@
 
     function getClosedLoopButtonLabel(mode, cfg = null) {
       const intervalText = getClosedLoopUploadPolicyText(mode, cfg);
+      let label;
       if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
-        return `闭环-仅对话+${intervalText}`;
+        label = `闭环-仅对话+${intervalText}`;
+      } else {
+        label = `闭环-快捷键+${intervalText}`;
       }
-      return `闭环-快捷键模式+${intervalText}`;
+      console.log('[CLOSED_LOOP_CONFIG][BUTTON_LABEL_RESOLVED]', {
+        action: mode,
+        label,
+        source: 'closed-loop-config:getClosedLoopButtonLabel',
+        ts: Date.now(),
+      });
+      return label;
     }
 
     function getClosedLoopModeLabel(mode, cfg = null) {
@@ -190,6 +206,12 @@
         return CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY_EVERY_ROUND;
       }
       return CLOSED_LOOP_CONTINUE_ACTIONS.WITH_HOTKEY;
+    }
+
+    if (typeof window !== 'undefined') {
+      window.ToolboxClosedLoopConfig = window.ToolboxClosedLoopConfig || {};
+      window.ToolboxClosedLoopConfig.normalizeClosedLoopAction = normalizeClosedLoopAction;
+      window.ToolboxClosedLoopConfig.getClosedLoopButtonLabel = getClosedLoopButtonLabel;
     }
 
     return Object.freeze({

@@ -90,6 +90,98 @@
 
     const TOOLBOX_FLOATING_HIDDEN_CLASS = 'cgpt-toolbox-floating-hidden';
 
+    const TOOLBOX_PANEL_HIDDEN_STORAGE_KEY = 'xz_toolbox_panel_hidden_v1';
+    const TOOLBOX_RESTORE_BUTTON_ID = 'xz-toolbox-restore-button';
+
+    function readToolboxPanelHiddenState() {
+      try {
+        return localStorage.getItem(TOOLBOX_PANEL_HIDDEN_STORAGE_KEY) === '1';
+      } catch (error) {
+        console.error('[TOOLBOX_UI][HIDDEN_STATE_READ_ERROR]', error);
+        appendLog(
+          `[TOOLBOX_UI][HIDDEN_STATE_READ_ERROR] ${error && error.message ? error.message : String(error)}`,
+        );
+        return false;
+      }
+    }
+
+    function writeToolboxPanelHiddenState(hidden) {
+      try {
+        localStorage.setItem(TOOLBOX_PANEL_HIDDEN_STORAGE_KEY, hidden ? '1' : '0');
+      } catch (error) {
+        console.error('[TOOLBOX_UI][HIDDEN_STATE_WRITE_ERROR]', error);
+        appendLog(
+          `[TOOLBOX_UI][HIDDEN_STATE_WRITE_ERROR] hidden=${hidden ? 1 : 0} error=${error && error.message ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    function ensureToolboxRestoreButton() {
+      let button = document.getElementById(TOOLBOX_RESTORE_BUTTON_ID);
+      if (!button) {
+        if (!document.body) {
+          console.error('[TOOLBOX_UI][RESTORE_BUTTON_BODY_MISSING]');
+          appendLog('[TOOLBOX_UI][RESTORE_BUTTON_BODY_MISSING]');
+          return null;
+        }
+
+        button = document.createElement('button');
+        button.id = TOOLBOX_RESTORE_BUTTON_ID;
+        button.type = 'button';
+        button.textContent = TOOLBOX_RESTORE_HANDLE_TITLE;
+        button.title = '点击恢复小张工具箱';
+        button.className = 'cgpt-toolbox-restore-button';
+        button.addEventListener('click', () => {
+          setToolboxPanelHidden(false, 'restore-button-click');
+        });
+        document.body.appendChild(button);
+      }
+      return button;
+    }
+
+    function setToolboxPanelHidden(hidden, reason = '') {
+      const panelEl = document.getElementById(APP.panelId);
+      const restoreButton = ensureToolboxRestoreButton();
+      if (!panelEl) {
+        console.error('[TOOLBOX_UI][SET_HIDDEN_PANEL_NOT_FOUND]', {
+          panelId: APP.panelId,
+          hidden,
+          reason,
+        });
+        return false;
+      }
+
+      panelEl.dataset.toolboxHidden = hidden ? '1' : '0';
+      panelEl.classList.toggle('cgpt-toolbox-panel-hidden', !!hidden);
+      if (hidden) {
+        panelEl.style.display = 'none';
+        if (restoreButton) {
+          restoreButton.style.display = 'inline-flex';
+        }
+        hideRestoreHandle('header-panel-ui-hidden');
+      } else {
+        panelEl.style.display = '';
+        if (restoreButton) {
+          restoreButton.style.display = 'none';
+        }
+      }
+      writeToolboxPanelHiddenState(!!hidden);
+      appendLog(
+        `[TOOLBOX_UI][PANEL_HIDDEN_CHANGE] hidden=${hidden ? 1 : 0} reason=${String(reason || '-')}`,
+      );
+      return true;
+    }
+
+    function initToolboxPanelHiddenFromStorage() {
+      if (!panel) {
+        panel = document.getElementById(APP.panelId);
+      }
+      ensureToolboxRestoreButton();
+      ensureHideButton();
+      const shouldHidePanel = readToolboxPanelHiddenState();
+      setToolboxPanelHidden(shouldHidePanel, 'init-from-storage');
+    }
+
     function isFloatingEdgeHidden() {
       return !!(root && (
         root.classList.contains('cgpt-edge-hidden')
@@ -596,6 +688,57 @@
           border-color: #3b82f6;
         }
 
+        #${APP.panelId} .cgpt-toolbox-header-hide-btn {
+          height: 24px;
+          padding: 0 10px;
+          border-radius: 8px;
+          border: 1px solid rgba(148, 163, 184, 0.45);
+          background: rgba(15, 23, 42, 0.95);
+          color: #e5e7eb;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+          line-height: 22px;
+          white-space: nowrap;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-hide-btn:hover {
+          background: rgba(30, 41, 59, 0.98);
+          border-color: rgba(96, 165, 250, 0.75);
+          color: #ffffff;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-panel-hidden {
+          display: none !important;
+        }
+
+        .cgpt-toolbox-restore-button {
+          position: fixed;
+          right: 18px;
+          top: 210px;
+          z-index: 2147483647;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          min-width: 92px;
+          height: 34px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(96, 165, 250, 0.85);
+          background: rgba(15, 23, 42, 0.96);
+          color: #ffffff;
+          font-size: 13px;
+          font-weight: 800;
+          box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+          cursor: pointer;
+          user-select: none;
+        }
+
+        .cgpt-toolbox-restore-button:hover {
+          background: rgba(37, 99, 235, 0.98);
+          border-color: rgba(147, 197, 253, 0.95);
+        }
+
         #${APP.panelId},
         #${APP.rootId}.cgpt-toolbox-root #${APP.panelId},
         .cgpt-toolbox-panel {
@@ -834,11 +977,11 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge {
-          min-height: 22px;
-          line-height: 22px;
+          min-height: 20px;
+          line-height: 20px;
           font-size: 11px;
-          padding: 2px 6px;
-          border-radius: 11px;
+          padding: 1px 5px;
+          border-radius: 10px;
           max-width: none;
           flex: 0 0 auto;
         }
@@ -1221,35 +1364,69 @@
           position: static !important;
           inset: auto !important;
           transform: none !important;
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
+          display: flex !important;
+          flex-direction: row !important;
+          flex-wrap: wrap !important;
+          align-items: center !important;
+          align-content: flex-start !important;
           justify-content: flex-start !important;
-          align-self: stretch;
-          width: 100%;
-          max-width: 100%;
-          min-width: 0;
-          min-height: 28px;
-          height: auto;
-          overflow: visible;
-          box-sizing: border-box;
-          padding: 0;
-          gap: 4px;
+          align-self: stretch !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          min-height: 24px !important;
+          height: auto !important;
+          overflow: visible !important;
+          box-sizing: border-box !important;
+          padding: 0 !important;
+          column-gap: 3px !important;
+          row-gap: 3px !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row,
         #${APP.panelId} .cgpt-toolbox-top-status,
         #${APP.panelId} .cgpt-top-status-row,
         #${APP.panelId} .cgpt-toolbox-status-row {
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
+          display: flex !important;
+          flex-direction: row !important;
+          flex-wrap: wrap !important;
+          align-items: center !important;
+          align-content: flex-start !important;
           justify-content: flex-start !important;
-          gap: 4px;
-          row-gap: 4px;
-          width: 100%;
-          min-height: 28px;
-          white-space: nowrap;
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          min-height: 24px !important;
+          white-space: nowrap !important;
+          column-gap: 3px !important;
+          row-gap: 3px !important;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-status-row > *,
+        #${APP.panelId} .cgpt-toolbox-top-status > *,
+        #${APP.panelId} .cgpt-top-status-row > *,
+        #${APP.panelId} .cgpt-toolbox-status-row > * {
+          flex: 0 0 auto !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-status-row [data-top-status-slot],
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-status-pill,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-top-stat-secondary,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-local-upload-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-local-message-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-top-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-top-badge-task,
+        #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-top-badge-attachment {
+          flex: 0 0 auto !important;
+          width: auto !important;
+          max-width: none !important;
+          min-width: 0 !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          align-self: center !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-status-badge,
@@ -1273,8 +1450,8 @@
           border-color: transparent !important;
         }
 
-        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge.cgpt-top-status-empty,
-        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge.cgpt-top-status-empty {
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge.cgpt-top-status-empty:not(.cgpt-top-status-placeholder),
+        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge.cgpt-top-status-empty:not(.cgpt-top-status-placeholder) {
           display: none !important;
           min-width: 0 !important;
           width: 0 !important;
@@ -1282,6 +1459,22 @@
           margin: 0 !important;
           border: 0 !important;
           background: transparent !important;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge.cgpt-top-status-placeholder,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge.cgpt-top-status-placeholder {
+          display: inline-flex !important;
+          visibility: visible !important;
+          pointer-events: none !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          box-sizing: border-box !important;
+          justify-content: center !important;
+          align-items: center !important;
+          overflow: hidden !important;
+          white-space: nowrap !important;
+          text-overflow: ellipsis !important;
+          flex-shrink: 0 !important;
         }
 
         /* 防御：spacer 绝不染成 danger/warning 等彩色块 */
@@ -1307,7 +1500,7 @@
           width: fit-content;
           max-width: max-content;
           height: 22px;
-          min-width: 52px;
+          min-width: 0;
           padding: 0 8px;
           border-radius: 999px;
           font-size: 12px;
@@ -1319,12 +1512,17 @@
           text-overflow: ellipsis;
         }
 
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-toolbox-top-status-badge {
+          min-width: 0 !important;
+        }
+
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="page-id"] {
-          min-width: 58px;
+          min-width: 0;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="turn-count"] {
-          min-width: 58px;
+          min-width: 0;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="upload-usage"] {
@@ -1337,16 +1535,19 @@
           max-width: none;
         }
 
-        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="task-state"] {
-          min-width: 64px;
-        }
-
-        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="attachment-state"] {
-          min-width: 0;
-        }
-
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"] {
           min-width: 48px;
+        }
+
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row [data-top-status-slot],
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-toolbox-top-status-badge {
+          width: auto !important;
+          min-width: 0 !important;
+          max-width: none !important;
+          flex: 0 0 auto !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge.is-hidden-placeholder {
@@ -1414,24 +1615,27 @@
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge,
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-status-pill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 24px;
-          line-height: 24px;
-          padding: 0 10px;
-          border-radius: 12px;
-          font-size: 12px;
-          font-weight: 700;
-          letter-spacing: 0;
-          box-sizing: border-box;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          min-height: 21px !important;
+          line-height: 21px !important;
+          padding: 0 6px !important;
+          border-radius: 10px !important;
+          font-size: 12px !important;
+          font-weight: 700 !important;
+          letter-spacing: 0 !important;
+          box-sizing: border-box !important;
           border: 1px solid transparent;
-          max-width: 100%;
-          min-width: 0;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          flex: 0 1 auto;
+          width: auto !important;
+          max-width: none !important;
+          min-width: 0 !important;
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          flex: 0 0 auto !important;
+          margin-left: 0 !important;
+          margin-right: 0 !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-id-badge {
@@ -5481,6 +5685,7 @@
         .cgpt-actions-row,
         .cgpt-autoq-actions,
         .cgpt-upload-actions,
+        .cgpt-upload-home-actions,
         .cgpt-action-row,
         .cgpt-autoq-top-action-bar,
         .cgpt-upload-main-action-row,
@@ -5489,9 +5694,44 @@
           display: flex !important;
           flex-wrap: wrap !important;
           align-items: center !important;
-          gap: 6px !important;
+          gap: 8px !important;
           min-width: 0 !important;
           max-width: 100% !important;
+        }
+
+        .cgpt-upload-actions .cgpt-btn,
+        .cgpt-upload-home-actions .cgpt-btn,
+        .cgpt-action-row .cgpt-btn,
+        .cgpt-upload-main-action-row .cgpt-btn,
+        .cgpt-upload-action-row .cgpt-btn {
+          position: relative !important;
+          z-index: 2 !important;
+          pointer-events: auto !important;
+          margin: 0 !important;
+          flex: 0 0 auto !important;
+        }
+
+        #cgpt-copy-last-message-scroll-bottom {
+          z-index: 4 !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-upload-actions .cgpt-btn,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-upload-home-actions .cgpt-btn,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-action-row .cgpt-btn,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-upload-main-action-row .cgpt-btn {
+          min-width: 96px !important;
+          max-width: 100% !important;
+        }
+
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-action-grid .cgpt-upload-main-action-row,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-action-grid .cgpt-upload-action-row,
+        #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-action-grid .cgpt-upload-main-action-row,
+        #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-action-grid .cgpt-upload-action-row {
+          display: flex !important;
+          flex-wrap: wrap !important;
+          gap: 8px !important;
+          align-items: center !important;
+          width: 100% !important;
         }
 
         .cgpt-toolbox-action-grid {
@@ -6985,12 +7225,49 @@
       });
     }
 
+    function ensureHideButton() {
+      if (!root) return;
+
+      const actions = qs('.cgpt-toolbox-header-actions', root);
+      if (!actions) return;
+
+      let hideButton = qs('.cgpt-toolbox-header-hide-btn', root);
+      if (hideButton) {
+        if (hideButton.dataset.hideBound !== '1') {
+          hideButton.dataset.hideBound = '1';
+          hideButton.addEventListener('click', () => {
+            setToolboxPanelHidden(true, 'header-hide-button-click');
+          });
+        }
+        return;
+      }
+
+      const compactBtn = qs('#cgpt-toolbox-compact', root);
+
+      hideButton = document.createElement('button');
+      hideButton.type = 'button';
+      hideButton.className = 'cgpt-toolbox-header-hide-btn';
+      hideButton.textContent = '隐藏';
+      hideButton.title = '隐藏工具箱面板，保留恢复入口';
+      hideButton.dataset.hideBound = '1';
+      hideButton.addEventListener('click', () => {
+        setToolboxPanelHidden(true, 'header-hide-button-click');
+      });
+
+      if (compactBtn) {
+        actions.insertBefore(hideButton, compactBtn);
+      } else {
+        actions.appendChild(hideButton);
+      }
+    }
+
     function ensureCompactButton() {
       if (!root) return;
 
       let compactBtn = qs('#cgpt-toolbox-compact', root);
       if (compactBtn) {
         markCompactModeToggleButton(compactBtn);
+        ensureHideButton();
         return;
       }
 
@@ -7005,6 +7282,7 @@
       markCompactModeToggleButton(compactBtn);
       compactBtn.textContent = '简洁';
       actions.insertBefore(compactBtn, actions.firstChild);
+      ensureHideButton();
     }
 
     function isValidShellRoot(node) {
@@ -7130,6 +7408,8 @@
             repairInvisibleToolboxState('create-existing-root-detached');
           }, 300);
           purgeForbiddenStatusBadge('create-existing-root');
+          ensureHideButton();
+          initToolboxPanelHiddenFromStorage();
           return root;
         }
 
@@ -7181,6 +7461,8 @@
             repairInvisibleToolboxState('create-reuse-delayed');
           }, 300);
 
+          initToolboxPanelHiddenFromStorage();
+
           return root;
         }
       }
@@ -7203,6 +7485,7 @@
               <div class="cgpt-toolbox-title">小张工具箱</div>
               <div class="cgpt-header-status-chips" aria-live="polite"></div>
               <div class="cgpt-toolbox-header-actions">
+                <button type="button" class="cgpt-toolbox-header-hide-btn" title="隐藏工具箱面板，保留恢复入口">隐藏</button>
                 <button type="button" class="cgpt-toolbox-small-btn cgpt-toolbox-compact-toggle" id="cgpt-toolbox-compact" data-cgpt-toolbox-action="compact-toggle" data-dynamic-label-allowed="1">简洁</button>
               </div>
             </div>
@@ -7274,6 +7557,8 @@
       restorePanelSize('init');
 
       ensureRestoreHandleElement();
+      ensureHideButton();
+      initToolboxPanelHiddenFromStorage();
 
       window.setTimeout(() => {
         if (panel && isPanelVisibleNow()) {
@@ -7428,6 +7713,7 @@
 
       ensurePanelShellClasses();
       ensureTabResponsiveClasses();
+      ensureHideButton();
 
       if (!toggle) {
         console.warn('[ChatGPT toolbox] bindEvents: toggle 不存在，取消绑定');
@@ -9488,6 +9774,11 @@
         return;
       }
 
+      if (isHeaderPanelUiHidden()) {
+        setToolboxPanelHidden(false, `restore-clear-header-hidden:${reason || '-'}`);
+        return;
+      }
+
       if (isDraggingToolbox || isResizingToolbox) {
         appendLog(`[TOOLBOX_RESTORE][skip] reason=${reason || '-'} dragging-or-resizing`);
         return;
@@ -9603,6 +9894,13 @@
 
     function repairInvisibleToolboxState(reason = '') {
       if (!root || !panel) return;
+
+      if (isHeaderPanelUiHidden()) {
+        if (!isToolboxRestoreButtonActuallyVisible()) {
+          setToolboxPanelHidden(true, `repair-restore-button:${reason || '-'}`);
+        }
+        return;
+      }
 
       if (isPanelHiddenNow() && hiddenTitlePositionLocked) {
         updateFloatingTitlePosition(`repair-hidden-title:${reason || '-'}`);
@@ -10763,8 +11061,30 @@
       return floatingTitle;
     }
 
+    function isHeaderPanelUiHidden() {
+      const panelEl = panel || document.getElementById(APP.panelId);
+      return !!(panelEl && panelEl.dataset.toolboxHidden === '1');
+    }
+
+    function isToolboxRestoreButtonActuallyVisible() {
+      const btn = document.getElementById(TOOLBOX_RESTORE_BUTTON_ID);
+      if (!btn) return false;
+
+      const style = window.getComputedStyle(btn);
+      const rect = btn.getBoundingClientRect();
+
+      return (
+        style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number(style.opacity || 1) > 0
+        && rect.width > 10
+        && rect.height > 10
+      );
+    }
+
     function isPanelVisibleNow() {
       if (!root || !panel) return false;
+      if (panel.dataset.toolboxHidden === '1') return false;
       if (panel.classList.contains('cgpt-toolbox-hidden')) return false;
       if (root.classList.contains('cgpt-toolbox-panel-hidden')) return false;
       if (root.classList.contains('cgpt-edge-hidden')) return false;
