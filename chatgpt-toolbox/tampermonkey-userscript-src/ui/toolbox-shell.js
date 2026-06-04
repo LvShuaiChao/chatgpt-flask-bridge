@@ -993,20 +993,26 @@
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header {
-          min-height: 34px;
-          padding: 4px 8px;
+          flex: 0 0 68px !important;
+          height: 68px !important;
+          min-height: 68px !important;
+          max-height: 68px !important;
+          padding: 4px 8px !important;
+          gap: 2px !important;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row {
           justify-content: flex-start !important;
-          align-self: stretch;
-          width: 100%;
-          flex-wrap: wrap;
-          row-gap: 3px;
-          max-height: none;
-          overflow: visible;
-          padding-left: 0;
-          padding-right: 0;
+          align-self: stretch !important;
+          width: 100% !important;
+          flex-wrap: wrap !important;
+          row-gap: 2px !important;
+          min-height: 38px !important;
+          height: 38px !important;
+          max-height: 38px !important;
+          overflow: hidden !important;
+          padding-left: 0 !important;
+          padding-right: 0 !important;
         }
 
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row .cgpt-toolbox-top-status-badge {
@@ -1289,14 +1295,16 @@
         }
 
         .cgpt-toolbox-header {
-          flex: 0 0 auto;
-          min-height: 42px;
-          padding: 6px 10px 6px 12px;
+          flex: 0 0 78px;
+          height: 78px;
+          min-height: 78px;
+          max-height: 78px;
+          padding: 4px 8px;
           display: flex;
           flex-direction: column;
           align-items: stretch;
-          gap: 4px;
-          overflow: visible;
+          gap: 2px;
+          overflow: hidden;
           background: #111827;
           border-bottom: 1px solid #2f3542;
           cursor: move;
@@ -1305,11 +1313,16 @@
         }
 
         .cgpt-toolbox-title-row {
+          flex: 0 0 24px;
+          height: 24px;
+          min-height: 24px;
+          max-height: 24px;
           display: flex;
           align-items: center;
           justify-content: space-between;
           min-width: 0;
           gap: 4px;
+          overflow: hidden;
         }
 
         .cgpt-header-status-chips {
@@ -1407,13 +1420,14 @@
           width: 100% !important;
           max-width: 100% !important;
           min-width: 0 !important;
-          min-height: 24px !important;
-          height: auto !important;
-          overflow: visible !important;
+          min-height: 44px !important;
+          height: 44px !important;
+          max-height: 44px !important;
+          overflow: hidden !important;
           box-sizing: border-box !important;
           padding: 0 !important;
           column-gap: 3px !important;
-          row-gap: 3px !important;
+          row-gap: 2px !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row,
@@ -1429,10 +1443,13 @@
           width: 100% !important;
           max-width: 100% !important;
           min-width: 0 !important;
-          min-height: 24px !important;
-          white-space: nowrap !important;
+          min-height: 44px !important;
+          height: 44px !important;
+          max-height: 44px !important;
+          overflow: hidden !important;
+          white-space: normal !important;
           column-gap: 3px !important;
-          row-gap: 3px !important;
+          row-gap: 2px !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row > *,
@@ -1671,7 +1688,7 @@
           margin-right: 0 !important;
         }
 
-        /* 顶部状态栏统一布局：像功能按钮一样自动换行，不固定行数 */
+        /* 顶部状态栏统一布局：允许换行，但固定保留两行高度，避免状态变化导致界面上下跳动 */
         #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row {
           display: flex !important;
           flex-direction: row !important;
@@ -1682,15 +1699,37 @@
           width: 100% !important;
           max-width: 100% !important;
           min-width: 0 !important;
-          min-height: 21px !important;
-          height: auto !important;
-          column-gap: 4px !important;
-          row-gap: 3px !important;
+          min-height: 44px !important;
+          height: 44px !important;
+          max-height: 44px !important;
+          column-gap: 3px !important;
+          row-gap: 2px !important;
           padding: 0 !important;
           margin: 0 !important;
           box-sizing: border-box !important;
-          overflow: visible !important;
+          overflow: hidden !important;
           white-space: normal !important;
+        }
+        /*
+         * 不再因为 extra-narrow 额外放大 header。
+         * 当前 extra-narrow 阈值是 460px，普通右侧悬浮工具箱经常会命中这个类。
+         * 如果这里保留 113px / 69px，就会在状态栏和 tabs 之间产生大块空白。
+         */
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-header,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-header {
+          flex: 0 0 78px !important;
+          height: 78px !important;
+          min-height: 78px !important;
+          max-height: 78px !important;
+          padding: 4px 8px !important;
+          gap: 2px !important;
+        }
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-header-status-row.cgpt-top-status-row,
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-header-status-row.cgpt-top-status-row {
+          min-height: 44px !important;
+          height: 44px !important;
+          max-height: 44px !important;
+          overflow: hidden !important;
         }
         /* 顶部状态胶囊：按内容宽度显示，不横向拉满 */
         #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row [data-top-status-slot],
@@ -1760,7 +1799,10 @@
           margin: 0 !important;
           border: 0 !important;
         }
-        /* 窄屏状态也继续使用自然换行，不要改成固定列 */
+        /*
+         * 窄屏状态栏仍然允许换行，但高度必须固定。
+         * 禁止 height:auto，否则状态文本变化时会继续把下面 tabs / 按钮顶来顶去。
+         */
         #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-header-status-row.cgpt-top-status-row,
         #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-header-status-row.cgpt-top-status-row,
         #${APP.panelId}.cgpt-toolbox-compact .cgpt-toolbox-header-status-row.cgpt-top-status-row {
@@ -1770,10 +1812,12 @@
           align-items: center !important;
           align-content: flex-start !important;
           width: 100% !important;
-          min-height: 21px !important;
-          height: auto !important;
-          column-gap: 4px !important;
-          row-gap: 3px !important;
+          min-height: 44px !important;
+          height: 44px !important;
+          max-height: 44px !important;
+          overflow: hidden !important;
+          column-gap: 3px !important;
+          row-gap: 2px !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-id-badge {
@@ -2037,8 +2081,9 @@
           display: flex;
           flex-wrap: wrap;
           align-items: center;
-          gap: 6px;
-          padding: 6px 12px;
+          align-content: flex-start;
+          gap: 4px;
+          padding: 4px 8px;
           min-width: 0;
           max-width: 100%;
           overflow-x: hidden;
@@ -2048,19 +2093,43 @@
           box-sizing: border-box;
         }
 
+        /*
+         * 顶部 tabs 保留一行高度。
+         * 它仍然允许换行，但普通 active 状态变化不能让它在一行/两行之间抖动。
+         */
+        .cgpt-toolbox-tabs.cgpt-top-tabs {
+          flex: 0 0 34px;
+          height: 34px;
+          min-height: 34px;
+          max-height: 34px;
+          align-content: flex-start;
+        }
+        #${APP.panelId}.cgpt-toolbox-narrow .cgpt-toolbox-tabs.cgpt-top-tabs,
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-tabs.cgpt-top-tabs {
+          flex: 0 0 64px;
+          height: 64px;
+          min-height: 64px;
+          max-height: 64px;
+          align-content: flex-start;
+        }
+
         .cgpt-toolbox-tab {
           flex: 0 0 auto;
           min-width: 0;
           max-width: none;
-          height: 32px;
+          height: 26px;
+          padding: 0 7px;
           border: 1px solid #3f4655;
           background: #171b22;
           color: #d1d5db;
-          border-radius: 9px;
+          border-radius: 8px;
           cursor: pointer;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+          font-size: 12px;
+          line-height: 24px;
+          font-weight: 650;
         }
 
         .cgpt-setting-prompt-toolbar {
@@ -2349,7 +2418,7 @@
           min-width: 0;
           overflow-y: auto;
           overflow-x: hidden !important;
-          padding: 10px;
+          padding: 6px;
         }
 
         .cgpt-toolbox-page {
@@ -3013,9 +3082,39 @@
           color: #ffffff !important;
         }
 
+        #cgpt-upload-start.cgpt-btn-danger,
+        #cgpt-upload-start.cgpt-action-running,
+        #cgpt-upload-start[data-cgpt-button-phase="danger"],
+        #cgpt-upload-start[data-cgpt-button-phase="uploading"],
+        #cgpt-upload-start[data-cgpt-button-phase="running"],
+        #cgpt-upload-start[data-cgpt-button-phase="waiting"],
+        #cgpt-copy-hotkey-once.cgpt-btn-danger,
+        #cgpt-copy-hotkey-once.cgpt-btn-busy,
+        #cgpt-copy-hotkey-once.cgpt-action-running,
+        #cgpt-copy-hotkey-once.cgpt-action-button-active,
+        #cgpt-copy-hotkey-once[data-cgpt-button-phase="danger"],
+        #cgpt-copy-hotkey-once[data-cgpt-button-phase="running"],
+        #cgpt-copy-hotkey-once[data-cgpt-button-phase="waiting"],
+        #cgpt-copy-hotkey-once[data-cgpt-button-phase="waiting_reply"],
+        #cgpt-copy-hotkey-once[data-cgpt-button-phase="copying"],
+        #cgpt-copy-hotkey-once[data-cgpt-button-phase="sending"] {
+          background: #dc2626 !important;
+          border-color: #ef4444 !important;
+          color: #ffffff !important;
+          opacity: 1 !important;
+          filter: none !important;
+          cursor: pointer !important;
+        }
+
+        #cgpt-upload-start.cgpt-task-running-indicator,
+        #cgpt-copy-hotkey-once.cgpt-task-running-indicator {
+          opacity: 1 !important;
+          filter: none !important;
+        }
+
         .cgpt-upload-action-toolbar {
           display: block;
-          margin: 0 0 10px;
+          margin: 0 0 6px;
           min-width: 0;
           max-width: 100%;
           overflow-x: hidden !important;
@@ -3027,7 +3126,7 @@
           flex-wrap: wrap;
           align-items: center;
           align-content: flex-start;
-          gap: 8px 8px;
+          gap: 6px 6px;
           width: 100%;
           margin: 0;
           padding: 0;
@@ -3142,6 +3241,20 @@
         #cgpt-send-message-btn.cgpt-send-btn-idle[disabled] {
           opacity: 0.72;
           cursor: not-allowed;
+        }
+
+        #cgpt-send-message-once[data-visual-dim="0"],
+        #cgpt-send-message-once[data-visual-dim="0"][disabled],
+        #cgpt-send-message-once[data-visual-dim="0"][aria-disabled="true"],
+        #cgpt-send-message-btn[data-visual-dim="0"],
+        #cgpt-send-message-btn[data-visual-dim="0"][disabled],
+        #cgpt-send-message-btn[data-visual-dim="0"][aria-disabled="true"],
+        button[data-action="send-message"][data-visual-dim="0"],
+        button[data-action="send-message"][data-visual-dim="0"][disabled],
+        button[data-action="send-message"][data-visual-dim="0"][aria-disabled="true"] {
+          opacity: 1 !important;
+          filter: none !important;
+          cursor: default;
         }
 
         .cgpt-btn-copy-continue:not(.cgpt-btn-busy),
@@ -5879,7 +5992,7 @@
           flex-wrap: wrap !important;
           align-items: center !important;
           align-content: flex-start !important;
-          gap: 8px 8px !important;
+          gap: 6px 6px !important;
           margin: 0 !important;
           padding: 0 !important;
           min-width: 0 !important;

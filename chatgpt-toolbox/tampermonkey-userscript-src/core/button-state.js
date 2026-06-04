@@ -156,6 +156,7 @@
     'cgpt-btn-uploading',
     'cgpt-btn-copying',
     'cgpt-btn-success',
+    'cgpt-btn-ok',
     'cgpt-btn-failed',
     'cgpt-btn-danger',
     'cgpt-btn-cancelled',
@@ -180,6 +181,7 @@
     'cgpt-btn-uploading',
     'cgpt-btn-copying',
     'cgpt-btn-success',
+    'cgpt-btn-ok',
     'cgpt-btn-warning',
     'cgpt-btn-waiting-danger',
   ]);
@@ -303,6 +305,7 @@
     const flags = authority && authority.flags ? authority.flags : {};
     const composer = authority && authority.composer ? authority.composer : {};
     const reply = authority && authority.reply ? authority.reply : {};
+    const task = authority && authority.task ? authority.task : {};
     const raw = authority && authority.raw ? authority.raw : {};
     const runningOwnerAction = String(
       typeof window !== 'undefined'
@@ -326,12 +329,26 @@
     } else if (flags.taskBusy === true) {
       disabledReason = 'task_busy';
     }
-    const sendPhase = String(reply.state || 'unknown');
+    const sendPhase = String(
+      task.sendPhase
+      || task.phase
+      || reply.sendPhase
+      || reply.state
+      || 'unknown'
+    ).trim().toLowerCase();
+    const pendingSend = !!(
+      flags.pendingSend === true
+      || reply.pendingSend === true
+      || reply.state === 'waiting_send'
+      || sendPhase === 'waiting_send'
+      || sendPhase === 'waiting_ready'
+      || sendPhase === 'waiting_page_reply_to_send'
+    );
     let buttonColorRole = 'normal';
     if (
       closedLoopRunning
       || batchTaskGroupRunning
-      || flags.pendingSend === true
+      || pendingSend === true
       || sendPhase === 'waiting_send'
     ) {
       buttonColorRole = 'running';
@@ -351,7 +368,7 @@
       taskBusy: flags.taskBusy === true || batchTaskGroupRunning,
       attachmentBusy: composer.composerUploading === true,
       closedLoopRunning,
-      pendingSend: flags.pendingSend === true,
+      pendingSend,
       realSendReady: composer.realSendButtonReady === true || composer.hasRealSendButton === true,
       sendPhase,
       disabledReason,
@@ -1565,20 +1582,44 @@
     } else {
       button.disabled = !canCancel && Boolean(disabled);
     }
-    if (!button.disabled) {
-      button.removeAttribute('disabled');
-    }
 
-    const isRunningVisual = isBusyState
-      || phase === ButtonPhase.DANGER
-      || phase === ButtonPhase.CANCELLING
-      || button.classList.contains('cgpt-btn-busy')
-      || button.classList.contains('cgpt-btn-danger')
-      || button.classList.contains('cgpt-action-running');
-    if (button.disabled && !isRunningVisual) {
-      applyDisabledVisualOnlyState(button, true, reason);
-    } else if (!button.disabled) {
-      applyDisabledVisualOnlyState(button, false);
+    const plainSendClickGateOnly = isSendBtn
+      && (
+        button.dataset.visualDim === '0'
+        || button.dataset.clickBlocked === '1'
+        || preserveDisabledIdleColor
+      )
+      && !isBusyState
+      && phase !== ButtonPhase.DANGER
+      && phase !== ButtonPhase.WAITING_SEND
+      && phase !== ButtonPhase.SENDING
+      && phase !== ButtonPhase.WAITING_REPLY
+      && phase !== ButtonPhase.CANCELLING;
+    if (plainSendClickGateOnly) {
+      button.disabled = false;
+      button.removeAttribute('disabled');
+      if (button.dataset.clickBlocked === '1') {
+        button.setAttribute('aria-disabled', 'true');
+      } else {
+        button.setAttribute('aria-disabled', 'false');
+      }
+      applyDisabledVisualOnlyState(button, false, reason || 'plain-send-click-gate');
+    } else {
+      if (!button.disabled) {
+        button.removeAttribute('disabled');
+      }
+
+      const isRunningVisual = isBusyState
+        || phase === ButtonPhase.DANGER
+        || phase === ButtonPhase.CANCELLING
+        || button.classList.contains('cgpt-btn-busy')
+        || button.classList.contains('cgpt-btn-danger')
+        || button.classList.contains('cgpt-action-running');
+      if (button.disabled && !isRunningVisual) {
+        applyDisabledVisualOnlyState(button, true, reason);
+      } else if (!button.disabled) {
+        applyDisabledVisualOnlyState(button, false);
+      }
     }
 
     if (isSendBtn) {

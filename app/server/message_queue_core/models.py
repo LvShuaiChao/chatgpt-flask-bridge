@@ -41,7 +41,12 @@ class MessageQueueItem:
         return cls(
             message_id=str(data.get("message_id") or ""),
             text=str(data.get("text") or data.get("content") or ""),
-            page_id=str(data.get("page_id") or data.get("page_instance_id") or ""),
+            page_id=str(
+                data.get("page_id")
+                or data.get("page_display_id")
+                or data.get("page_no")
+                or ""
+            ),
             conversation_id=str(data.get("conversation_id") or ""),
             status=str(data.get("status") or data.get("message_status") or "pending"),
             retry_count=int(data.get("retry_count") or 0),

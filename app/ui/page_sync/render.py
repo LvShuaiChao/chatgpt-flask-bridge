@@ -61,17 +61,43 @@ def format_sync_target_status_text(
             return profile.get(key)
         return default
 
-    send_now = bool(_field("send_now_available", False))
-    send_queueable = bool(_field("send_queueable", False))
-    send_decision = (_field("send_decision") or "").strip()
-    send_requestable = _field("send_decision", "blocked") in ("allowed", "queued")
-    is_responding = bool(_field("is_responding", False))
+    response_state = str(_field("response_state", "unknown") or "unknown").strip().lower()
+    legacy_is_responding = bool(_field("is_responding", False))
+    response_busy = (
+        response_state in {
+            "responding",
+            "generating",
+            "streaming",
+            "assistant_busy",
+            "busy",
+        }
+        or (
+            response_state == "unknown"
+            and legacy_is_responding
+        )
+    )
+    send_decision = str(_field("send_decision", "blocked") or "blocked").strip().lower()
+    can_send_now = bool(
+        _field(
+            "can_send_now",
+            _field("send_now_available", False),
+        )
+    )
+    send_now = (
+        send_decision == "allowed"
+        or can_send_now
+    )
+    send_queueable = (
+        send_decision == "queued"
+        or bool(_field("send_queueable", False))
+    )
+    send_requestable = send_decision in ("allowed", "queued")
     sync_line = "同步：可同步"
     if send_now:
         return f"{sync_line}｜发送：可发送"
-    if send_queueable or send_decision == "queued":
+    if send_queueable:
         return f"{sync_line}｜发送：可排队"
-    if is_responding:
+    if response_busy:
         return f"{sync_line}｜发送：等待回复"
     if queue_size > 0:
         return f"{sync_line}｜发送：等待队列"

@@ -35,8 +35,19 @@ def run_auto_bind(
         state.mark_bound(
             account_id=account.get("account_id") or "",
             display_name=account.get("display_name") or "",
-            page_id=str(matched.get("page_instance_id") or matched.get("page_display_id") or ""),
+            page_id=str(
+                matched.get("page_display_id")
+                or matched.get("page_no")
+                or ""
+            ),
             conversation_id=str(matched.get("conversation_id") or ""),
+        )
+        logger.info(
+            "[PAGE_AUTO_BIND][BOUND] page_display_id=%s page_instance_id=%s conversation_id=%s account_id=%s",
+            matched.get("page_display_id") or matched.get("page_no") or "-",
+            matched.get("page_instance_id") or "-",
+            matched.get("conversation_id") or "-",
+            account.get("account_id") or "-",
         )
     if notify_ui is not None:
         notify_ui(state)

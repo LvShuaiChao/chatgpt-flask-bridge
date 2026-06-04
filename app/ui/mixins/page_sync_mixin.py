@@ -260,9 +260,25 @@ class PageSyncMixin:
         bound_plugin = self._page_plugin_status_text(bound_info)
         bound_focus = self._page_focus_text(bound_info)
         syncable_log = "yes" if sync_readable else "no"
+        if target_profile:
+            target_send_decision = str(
+                target_profile.get("send_decision") or ""
+            ).strip().lower()
+            target_can_send_now = bool(
+                target_profile.get(
+                    "can_send_now",
+                    target_profile.get("send_now_available", False),
+                )
+            )
+        else:
+            target_send_decision = ""
+            target_can_send_now = False
         sendable_log = (
             "yes"
-            if target_profile and target_profile.get("send_now_available")
+            if target_profile and (
+                target_can_send_now
+                or target_send_decision in ("allowed", "queued")
+            )
             else ("no" if target_profile else "-")
         )
         bound_from_session = (remote.get("client_id") or "").strip() or "-"
@@ -1316,6 +1332,8 @@ class PageSyncMixin:
             print("[SYNC][POLLING_CHECK][ERROR] is_page_polling_active failed: error_type={} error={}".format(type(exc).__name__, exc))
             polling_active = False
 
+        sync_reason_label = (block_reason or "-").strip() or "-"
+
         self._append_log(
             "[SYNC][POLLING_CHECK] "
             "session_id={} ".format(session_id)
@@ -1330,7 +1348,8 @@ class PageSyncMixin:
             + "polling_value={} ".format(polling_value or "-")
             + "polling_active={} ".format("true" if polling_active else "false")
             + "decision={} ".format("allow" if allowed else "block")
-            + "block_reason={}".format(block_reason or "-"),
+            + "reason_code={} ".format(sync_reason_label)
+            + "legacy_block_reason={}".format(sync_reason_label),
             echo=True,
         )
         self._append_log(
@@ -1348,7 +1367,8 @@ class PageSyncMixin:
             + "polling_active={} ".format("true" if polling_active else "false")
             + "client_id={} ".format(client_id or "-")
             + "conversation_id={} ".format(conversation_id or "-")
-            + "block_reason={}".format(block_reason or "-"),
+            + "reason_code={} ".format(sync_reason_label)
+            + "legacy_block_reason={}".format(sync_reason_label),
             echo=True,
         )
 

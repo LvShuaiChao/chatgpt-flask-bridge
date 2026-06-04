@@ -12,6 +12,7 @@ from app.constants import (
     is_assistant_reply_pending_status,
 )
 from app.models import default_remote_chatgpt, normalize_remote_chatgpt
+from app.utils.page_status import BUSY_RESPONSE_STATES
 
 
 class SessionPendingMixin:
@@ -154,20 +155,45 @@ class SessionPendingMixin:
 
     def _bound_page_indicates_idle(self, session):
         state = self._session_bound_response_state(session)
-        response_state = (state.get("response_state") or "").strip().lower()
+        response_state = str(state.get("response_state") or "unknown").strip().lower()
         return (
             bool(state.get("can_accept_input", True))
-            and not bool(state.get("is_responding"))
             and response_state == "idle"
         )
 
     def _bound_page_indicates_busy(self, session):
         """绑定页正在生成/忙碌时不应清理 pending。"""
         state = self._session_bound_response_state(session)
-        response_state = (state.get("response_state") or "").strip().lower()
-        if bool(state.get("is_responding")):
+        response_state = str(state.get("response_state") or "unknown").strip().lower()
+        legacy_is_responding = bool(state.get("is_responding"))
+        derived_is_responding = (
+            response_state in BUSY_RESPONSE_STATES
+            or (
+                response_state == "unknown"
+                and legacy_is_responding
+            )
+        )
+        if response_state in BUSY_RESPONSE_STATES:
+            logger.info(
+                "[PENDING_REPLY][BOUND_RESPONSE_STATE] "
+                "response_state=%s legacy_is_responding=%s "
+                "derived_is_responding=%s can_accept_input=%s",
+                response_state,
+                legacy_is_responding,
+                derived_is_responding,
+                bool(state.get("can_accept_input", True)),
+            )
             return True
-        if response_state in ("generating", "assistant_busy"):
+        if response_state == "unknown" and legacy_is_responding:
+            logger.info(
+                "[PENDING_REPLY][BOUND_RESPONSE_STATE] "
+                "response_state=%s legacy_is_responding=%s "
+                "derived_is_responding=%s can_accept_input=%s",
+                response_state,
+                legacy_is_responding,
+                derived_is_responding,
+                bool(state.get("can_accept_input", True)),
+            )
             return True
         remote = normalize_remote_chatgpt(
             getattr(session, "remote_chatgpt", None) or default_remote_chatgpt()
@@ -509,11 +535,20 @@ class SessionPendingMixin:
                 "response_state": "unknown",
                 "can_accept_input": True,
             }
+        response_state = str(
+            client_info.get("response_state") or "unknown"
+        ).strip().lower() or "unknown"
+        legacy_is_responding = bool(client_info.get("is_responding", False))
+        derived_is_responding = (
+            response_state in BUSY_RESPONSE_STATES
+            or (
+                response_state == "unknown"
+                and legacy_is_responding
+            )
+        )
         return {
-            "is_responding": bool(client_info.get("is_responding", False)),
-            "response_state": (
-                client_info.get("response_state") or "unknown"
-            ).strip() or "unknown",
+            "is_responding": derived_is_responding,
+            "response_state": response_state,
             "can_accept_input": bool(client_info.get("can_accept_input", True)),
         }
 

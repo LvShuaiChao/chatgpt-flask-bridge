@@ -482,7 +482,15 @@ class UiStatusCompactMixin:
             return "发送：可发送", "ok"
         if send_decision == "queued":
             return "发送：可排队", "warn"
-        if response_state in BUSY_RESPONSE_STATES or bool(data.get("is_responding")):
+        legacy_is_responding = bool(data.get("is_responding"))
+        response_busy = (
+            response_state in BUSY_RESPONSE_STATES
+            or (
+                response_state == "unknown"
+                and legacy_is_responding
+            )
+        )
+        if response_busy:
             return "发送：等待回复", "warn"
         if reason_code:
             return f"发送：不可发送（{reason_code}）", "error"

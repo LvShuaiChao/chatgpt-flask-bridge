@@ -20,18 +20,20 @@ def parse_page_snapshot(payload: Dict[str, Any]) -> PageSyncState:
         )
         raise TypeError(f"parse_page_snapshot expected dict, got {type(payload)!r}")
     logger.info(
-        "[PAGE_SYNC_SNAPSHOT][PARSE] page_id=%s conversation_id=%s",
-        payload.get("page_id") or payload.get("page_display_id") or "-",
+        "[PAGE_SYNC_SNAPSHOT][PARSE] page_display_id=%s page_instance_id=%s conversation_id=%s",
+        payload.get("page_display_id") or payload.get("page_no") or payload.get("page_id") or "-",
+        payload.get("page_instance_id") or "-",
         payload.get("conversation_id") or "-",
     )
     state = PageSyncState()
     state.update_from_payload(payload)
     logger.info(
-        "[PAGE_SYNC_SNAPSHOT][RESULT] page_id=%s bridge_connected=%s inputable=%s sendable=%s",
-        state.page_id,
+        "[PAGE_SYNC_SNAPSHOT][RESULT] page_display_id=%s page_instance_id=%s bridge_connected=%s can_accept_input=%s can_send_now=%s",
+        state.page_display_id,
+        state.page_instance_id,
         int(state.bridge_connected),
-        int(state.inputable),
-        int(state.sendable),
+        int(state.can_accept_input),
+        int(state.can_send_now),
     )
     return state
 

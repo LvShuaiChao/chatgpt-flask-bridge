@@ -1156,7 +1156,8 @@ def compact_page_decision_fields(decision: dict) -> str:
         + "can_sync=" + str(decision.get("can_sync") or "-") + " "
         + "can_send=" + str(decision.get("can_send") or "-") + " "
         + "busy=" + str(decision.get("busy") or "-") + " "
-        + "block_reason=" + str(decision.get("block_reason") or decision.get("reason_code") or decision.get("reason") or "-")
+        + "reason_code=" + str(decision.get("reason_code") or decision.get("block_reason") or decision.get("reason") or "-")
+        + " legacy_block_reason=" + str(decision.get("block_reason") or "-")
     )
 
 

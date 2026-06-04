@@ -1054,25 +1054,88 @@
         const phase = String(sendMessageTaskState.phase || '').trim();
         if (SEND_TASK_EXTERNAL_RECONCILE_PENDING_PHASES.has(phase)) {
           const oldPhase = phase;
-          const action = String(sendMessageTaskState.action || sendMessageTaskState.plan?.mode || 'send-message');
+          const oldRunId = sendMessageTaskState.runId || '';
+          const oldAction = String(
+            sendMessageTaskState.action
+            || (sendMessageTaskState.plan && sendMessageTaskState.plan.mode)
+            || 'send-message'
+          ).trim();
+          const oldOwnerButtonId = sendMessageTaskState.ownerButtonId || getButtonIdBySendAction(oldAction);
           if (!sendMessageTaskState.ownerButtonId) {
-            sendMessageTaskState.ownerButtonId = getButtonIdBySendAction(action);
+            sendMessageTaskState.ownerButtonId = oldOwnerButtonId;
           }
-          markSendMessageNativeSendClicked(`external-native-send:${reason}`);
+          const shouldFinishAsPlainSend = shouldPlainSendButtonFinishAfterSubmit(sendMessageTaskState);
+          const nativeClickedResult = markSendMessageNativeSendClicked(`external-native-send:${reason}`);
+          if (shouldFinishAsPlainSend && nativeClickedResult === true) {
+            noteSharedSendOutcome({
+              ok: true,
+              sent: true,
+              verified: true,
+              reason: 'plain-send-submitted',
+              verifyReason: 'external-native-send-detected',
+              responseState: 'generating',
+            });
+            state.waitingRealSendButton = false;
+            uploadSendShortcutRunning = false;
+            uploadSendTaskStartedAt = 0;
+            lastWaitRealSendButtonLogAt = 0;
+            state.cancelWaitingSend = false;
+            state.pendingSendAfterReply = false;
+            state.pendingSendAfterReplySource = '';
+            state.pendingSendRetrying = false;
+            state.uploadSendFailureHint = '';
+            state.uploadSendFailureHintAt = 0;
+            state.uploadSendSuccessHint = '';
+            state.uploadSendSuccessHintAt = 0;
+            ToolboxShell.appendLog(
+              `[SEND_TASK][EXTERNAL_NATIVE_SEND_PLAIN_FINISH] `
+              + `reason=${reason || '-'} `
+              + `oldAction=${oldAction || '-'} `
+              + `oldOwner=${oldOwnerButtonId || '-'} `
+              + `oldPhase=${oldPhase || '-'} `
+              + `oldRunId=${oldRunId || '-'} `
+              + `nativeClickedResult=${nativeClickedResult ? 1 : 0} `
+              + `nextPhase=idle `
+              + `plainSend=1`,
+            );
+            ToolboxShell.appendLog(
+              `[SEND_BUTTON][STATE_RECONCILED] `
+              + `id=${oldOwnerButtonId || 'cgpt-send-message-once'} `
+              + `from=${oldPhase} `
+              + `to=idle `
+              + `reason=plain-send-submitted-external-native-send`,
+            );
+            reconciled = true;
+            if (typeof renderUploadButtonsOnly === 'function') {
+              scheduleRenderUpload(`external-native-send-plain-finish:${reason}`);
+            }
+            return true;
+          }
           sendMessageTaskState.externalNativeSendDetected = true;
           sendMessageTaskState.responseStartedAt = sendMessageTaskState.responseStartedAt || Date.now();
           setAuthoritativeSendTaskState(
             {
               phase: 'waiting_reply',
-              runId: sendMessageTaskState.runId || (state.sendTask && state.sendTask.runId) || '',
+              runId: sendMessageTaskState.runId || (state.sendTask && state.sendTask.runId) || oldRunId || '',
             },
             `external-native-send:${reason}`,
           );
           ToolboxShell.appendLog(
-            `[SEND_TASK][EXTERNAL_NATIVE_SEND_DETECTED] reason=${reason || '-'} action=${action} oldPhase=${oldPhase} newPhase=${sendMessageTaskState.phase || '-'} owner=${sendMessageTaskState.ownerButtonId || '-'} responseState=generating`,
+            `[SEND_TASK][EXTERNAL_NATIVE_SEND_DETECTED] `
+            + `reason=${reason || '-'} `
+            + `action=${oldAction || '-'} `
+            + `oldPhase=${oldPhase} `
+            + `newPhase=${sendMessageTaskState.phase || '-'} `
+            + `owner=${sendMessageTaskState.ownerButtonId || oldOwnerButtonId || '-'} `
+            + `responseState=generating `
+            + `plainSend=0`,
           );
           ToolboxShell.appendLog(
-            `[SEND_BUTTON][STATE_RECONCILED] id=${sendMessageTaskState.ownerButtonId || 'cgpt-send-message-once'} from=${oldPhase} to=${sendMessageTaskState.phase || '-'} reason=assistant-generating`,
+            `[SEND_BUTTON][STATE_RECONCILED] `
+            + `id=${sendMessageTaskState.ownerButtonId || oldOwnerButtonId || 'cgpt-send-message-once'} `
+            + `from=${oldPhase} `
+            + `to=${sendMessageTaskState.phase || '-'} `
+            + `reason=assistant-generating`,
           );
           reconciled = true;
         }
@@ -9509,7 +9572,7 @@
         const fallbackStartedAt = Date.now();
         let fallbackCopyHotkeyResult = null;
         ToolboxShell.appendLog(
-          `[SEND_COPY_HOTKEY][NO_PAYLOAD_FALLBACK_COPY_HOTKEY_ENTER] source=${src} ownerButtonId=${ownerButtonId} waitForCurrentReply=0 preferVisibleAssistantImmediately=1 skipWaitWhenReplyAlreadyStable=1`,
+          `[SEND_COPY_HOTKEY][NO_PAYLOAD_FALLBACK_COPY_HOTKEY_ENTER] source=${src} ownerButtonId=${ownerButtonId} waitForCurrentReply=1 preferVisibleAssistantImmediately=0 skipWaitWhenReplyAlreadyStable=1`,
         );
         try {
           fallbackCopyHotkeyResult = await runCopyHotkeyOnceCore({
@@ -9518,10 +9581,11 @@
             ownerTaskKey: 'send-copy-hotkey',
             ownerButtonId,
             skipActionLock: true,
-            waitForCurrentReply: false,
+            // 输入框为空时，不发送消息，但仍然必须等待当前回答完成后再复制+快捷键。
+            waitForCurrentReply: true,
             skipWaitWhenReplyAlreadyStable: true,
-            allowVisibleAssistantFallback: true,
-            preferVisibleAssistantImmediately: true,
+            allowVisibleAssistantFallback: false,
+            preferVisibleAssistantImmediately: false,
             suppressOwnerMirror: true,
           });
         } catch (error) {
@@ -9723,7 +9787,11 @@
         ownerTaskKey: 'send-copy-hotkey',
         ownerButtonId,
         skipActionLock: true,
+        // 发送动作完成后，不再看发送按钮状态，只等回答完成。
         waitForCurrentReply: true,
+        skipWaitWhenReplyAlreadyStable: true,
+        allowVisibleAssistantFallback: false,
+        preferVisibleAssistantImmediately: false,
         suppressOwnerMirror: true,
       });
       if (!copyHotkeyResult || copyHotkeyResult.ok !== true) {
@@ -9904,6 +9972,49 @@
         || ownerButtonId.includes('send-message')
         || ownerButtonId.includes('send-button')
         || ownerButtonId === 'send'
+      );
+    }
+
+    function isPlainSendButtonDangerPhase(phase) {
+      if (
+        typeof UploadButtonVm !== 'undefined'
+        && typeof UploadButtonVm.isPlainSendButtonDangerPhase === 'function'
+      ) {
+        return UploadButtonVm.isPlainSendButtonDangerPhase(phase);
+      }
+      const normalized = String(phase || '').trim().toLowerCase();
+      return (
+        normalized === 'waiting_composer'
+        || normalized === 'waiting_send'
+        || normalized === 'clicking_send'
+        || normalized === 'submitting'
+        || normalized === 'sending'
+      );
+    }
+
+    function applyPlainSendMessageClickGateOnButton(button, authorityForGate, reason = '') {
+      if (
+        !button
+        || typeof UploadButtonVm === 'undefined'
+        || typeof UploadButtonVm.applyPlainSendMessageClickGate !== 'function'
+      ) {
+        return null;
+      }
+      const capability = {
+        can_send_now: isToolboxAuthorityCanSendNow(authorityForGate),
+        canSendNow: isToolboxAuthorityCanSendNow(authorityForGate),
+        response_state: authorityForGate && authorityForGate.reply
+          ? authorityForGate.reply.state
+          : '',
+        replyBusy: authorityForGate && authorityForGate.reply
+          ? authorityForGate.reply.busy === true
+          : false,
+      };
+      return UploadButtonVm.applyPlainSendMessageClickGate(
+        button,
+        {},
+        capability,
+        reason || 'upload-module-click-gate',
       );
     }
 
@@ -28722,7 +28833,7 @@
 
       const skipWaitWhenReplyAlreadyStable = options.skipWaitWhenReplyAlreadyStable === true;
       const shouldReadVisibleAssistantFirst =
-        preferVisibleAssistantImmediately === true || waitForCurrentReply === false;
+        preferVisibleAssistantImmediately === true && waitForCurrentReply === false;
 
       ToolboxShell.appendLog(
         `[COPY_WAIT][OPTIONS] source=${String(source || '-')} reason=${String(reason || '-')} waitForCurrentReply=${waitForCurrentReply ? 1 : 0} preferVisibleAssistantImmediately=${preferVisibleAssistantImmediately ? 1 : 0} allowVisibleAssistantFallback=${allowVisibleAssistantFallback ? 1 : 0} skipWaitWhenReplyAlreadyStable=${skipWaitWhenReplyAlreadyStable ? 1 : 0}`,
@@ -29365,8 +29476,11 @@
         const waitCopyResult = await waitAndCopyLatestAssistant({
           source,
           reason: `copy-only:${String(source || '-')}`,
-          allowVisibleAssistantFallback: true,
-          preferVisibleAssistantImmediately: true,
+          // 复制最后回复也必须遵守：回答完成后再复制。
+          waitForCurrentReply: true,
+          skipWaitWhenReplyAlreadyStable: true,
+          allowVisibleAssistantFallback: false,
+          preferVisibleAssistantImmediately: false,
         });
 
         if (!waitCopyResult.ok) {
@@ -31763,7 +31877,11 @@
           event.preventDefault();
           event.stopPropagation();
 
-          void handleCopyHotkeyOnceTrigger('shortcut', event);
+          dispatchShortcutAsToolbarButtonClick(
+            'copy-hotkey-once',
+            event,
+            'shortcut:copyAndHotkeyOnce:legacy-window',
+          );
         },
         true,
       );
@@ -31822,23 +31940,11 @@
         event.stopImmediatePropagation();
       }
 
-      const btn = rootElRef ? qs(UploadSelectors.sendCopyHotkeyBtn, rootElRef) : null;
-      if (!btn) {
-        ToolboxShell.appendLog('[SHORTCUT][SEND_COPY_HOTKEY_SKIP] reason=button-missing');
-        setStatus('发送+复制+快捷键按钮未找到，无法通过快捷键触发', 'warn');
-        return true;
-      }
-
-      const runtimeAction = resolveUploadButtonRuntimeAction(btn, 'send-copy-hotkey');
-      ToolboxShell.appendLog(
-        `[SHORTCUT][SEND_COPY_HOTKEY_TRIGGER] source=${source || '-'} action=${runtimeAction || 'send-copy-hotkey'}`,
-      );
-      dispatchToolboxActionSafe(runtimeAction || 'send-copy-hotkey', {
-        button: btn,
-        source: `shortcut-send-copy-hotkey:${source || 'document'}`,
+      return dispatchShortcutAsToolbarButtonClick(
+        'send-copy-hotkey',
         event,
-      });
-      return true;
+        `shortcut-send-copy-hotkey:${source || 'document'}`,
+      );
     }
 
     function bindSendCopyAndHotkeyShortcut() {
@@ -32045,6 +32151,8 @@
       const ownerTaskKey = String(options.ownerTaskKey || ownerAction).trim() || ownerAction;
       const waitForCurrentReply = options.waitForCurrentReply !== false;
       const skipWaitWhenReplyAlreadyStable = options.skipWaitWhenReplyAlreadyStable === true;
+      const allowVisibleAssistantFallback = options.allowVisibleAssistantFallback === true;
+      const preferVisibleAssistantImmediately = options.preferVisibleAssistantImmediately === true;
       const skipActionLock = options.skipActionLock === true;
       const suppressOwnerMirror = options.suppressOwnerMirror === true;
       const externalShouldStop = typeof options.shouldStop === 'function'
@@ -32143,14 +32251,23 @@
           );
         }
 
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CORE][WAIT_RULE] `
+          + `source=${sourceText} `
+          + `waitForCurrentReply=${waitForCurrentReply ? 1 : 0} `
+          + `skipWaitWhenReplyAlreadyStable=${skipWaitWhenReplyAlreadyStable ? 1 : 0} `
+          + `allowVisibleAssistantFallback=${allowVisibleAssistantFallback ? 1 : 0} `
+          + `preferVisibleAssistantImmediately=${preferVisibleAssistantImmediately ? 1 : 0} `
+          + `rule=wait-reply-done-before-copy`,
+        );
         const waitCopyResult = await waitAndCopyLatestAssistant({
           source: sourceText,
           reason: `copy-hotkey-core:${sourceText}`,
           shouldStop,
           waitForCurrentReply,
           skipWaitWhenReplyAlreadyStable,
-          allowVisibleAssistantFallback: true,
-          preferVisibleAssistantImmediately: waitForCurrentReply === false || skipWaitWhenReplyAlreadyStable === true,
+          allowVisibleAssistantFallback,
+          preferVisibleAssistantImmediately,
         });
 
         if (!waitCopyResult.ok) {
@@ -36907,6 +37024,43 @@
         next.phase != null ? next.phase : previous.phase,
       );
 
+      const reasonTextForPlainSendGuard = String(reason || '').trim().toLowerCase();
+      const nextPhaseTextForPlainSendGuard = String(nextPhase || '').trim().toLowerCase();
+      const currentActionForPlainSendGuard = String(
+        previous.action
+        || previous.ownerAction
+        || previous.visualOwnerAction
+        || ''
+      ).trim().toLowerCase();
+      const currentOwnerForPlainSendGuard = String(
+        previous.ownerButtonId
+        || previous.visualOwnerButtonId
+        || ''
+      ).trim().toLowerCase();
+      const isPlainSendExternalWaitingReplyPollution = (
+        nextPhaseTextForPlainSendGuard === 'waiting_reply'
+        && reasonTextForPlainSendGuard.startsWith('external-native-send:')
+        && previous.running !== true
+        && (
+          currentActionForPlainSendGuard === 'send-message'
+          || currentActionForPlainSendGuard === 'send'
+          || currentOwnerForPlainSendGuard === 'cgpt-send-message-once'
+        )
+      );
+      if (isPlainSendExternalWaitingReplyPollution) {
+        ToolboxShell.appendLog(
+          `[SEND_STATE][WAITING_REPLY_WRITE_BLOCKED] `
+          + `reason=${reason || '-'} `
+          + `oldPhase=${previous.phase || '-'} `
+          + `nextPhase=${nextPhase || '-'} `
+          + `running=${previous.running ? 1 : 0} `
+          + `action=${currentActionForPlainSendGuard || '-'} `
+          + `owner=${currentOwnerForPlainSendGuard || '-'} `
+          + `detail=plain_send_already_finished`,
+        );
+        return state.sendTask;
+      }
+
       if (
         !canOverrideSendSuccess(oldPhase, nextPhase, lastSharedSendOutcome)
         && (nextPhase === CANONICAL_SEND_PHASES.FAILED || nextPhase === CANONICAL_SEND_PHASES.CANCELLED)
@@ -40000,6 +40154,17 @@
           + `ignoreAutoQueueRunning=${ignoreAutoQueueRunning ? 1 : 0}`,
         );
         const view = UploadButtonVm.getUploadButtonViewState(uploadSnapshot);
+        ToolboxShell.appendLog(
+          `[UPLOAD_BUTTON][VIEW_APPLY] `
+          + `reason=${reason} `
+          + `moduleReady=${state.moduleReady ? 1 : 0} `
+          + `moduleInitState=${String(state.moduleInitState || '-')} `
+          + `phase=${String(view.phase || '-')} `
+          + `buttonPhase=${String(view.buttonPhase || '-')} `
+          + `disabled=${view.disabled ? 1 : 0} `
+          + `action=${String(view.action || '-')} `
+          + `activeFiles=${activeFiles}`,
+        );
         return UploadButtonVm.applyUploadButtonViewState(button, view, reason, {
           snapshot: uploadSnapshot,
           buttonName: 'start-upload',
@@ -40235,13 +40400,45 @@
           finalizeSendButtonStateFromTask(reason);
           return idleResult;
         }
+
+        const taskPhase = String(sendMessageTaskState.phase || '').trim().toLowerCase();
+        if (isPlainSendMessageTask(sendMessageTaskState) && !isPlainSendButtonDangerPhase(taskPhase)) {
+          button.dataset.action = 'send-message';
+          if (typeof ButtonState !== 'undefined' && typeof ButtonState.setButtonRuntimeAction === 'function') {
+            ButtonState.setButtonRuntimeAction(button, 'send-message');
+          } else {
+            button.dataset.cgptRuntimeAction = 'send-message';
+          }
+          setSendMessageButtonVisualState(button, false, sendMessageTaskState.phase);
+          button.classList.toggle('cgpt-btn-danger', false);
+          const authorityForPlainSubmitted = getToolboxAuthorityState('send-message-button-submitted', {
+            force: true,
+          });
+          applyPlainSendMessageClickGateOnButton(
+            button,
+            authorityForPlainSubmitted,
+            `${reason}:plain-send-submitted`,
+          );
+          const submittedIdleResult = setButtonIdle(button, '发送消息', {
+            title: '发送当前输入框中的文字和附件（点击 ChatGPT 页面发送按钮）',
+            reason: `${reason}:plain-send-submitted`,
+          });
+          finalizeSendButtonStateFromTask(reason);
+          return submittedIdleResult;
+        }
+
         const taskText = getSendMessageButtonText();
         const isStopView = sendMessageTaskState.phase === SEND_MESSAGE_PHASES.SENT_WAITING_RESPONSE
           || sendMessageTaskState.phase === SEND_MESSAGE_PHASES.STOPPING_RESPONSE
-          || !!sendMessageTaskState.hasClickedNativeSend
-          || !!sendMessageTaskState.nativeSendClicked
-          || !!sendMessageTaskState.externalNativeSendDetected
-          || isAssistantGeneratingNow('applySendMessageButtonState');
+          || (
+            !isPlainSendMessageTask(sendMessageTaskState)
+            && (
+              !!sendMessageTaskState.hasClickedNativeSend
+              || !!sendMessageTaskState.nativeSendClicked
+              || !!sendMessageTaskState.externalNativeSendDetected
+              || isAssistantGeneratingNow('applySendMessageButtonState')
+            )
+          );
         button.dataset.action = 'send-message';
         if (typeof ButtonState !== 'undefined' && typeof ButtonState.setButtonRuntimeAction === 'function') {
           ButtonState.setButtonRuntimeAction(button, 'cancel-send');
@@ -40363,13 +40560,16 @@
         force: true,
       });
       const canSendNowForButton = isToolboxAuthorityCanSendNow(authorityForSendButtonView);
-      const shouldDisableSendMessageButton = !!(
-        !canSendNowForButton
-        || authorityForSendButtonView.reply.state === TOOLBOX_REPLY_STATES.ANSWERING
+      const replyAnsweringOnly = (
+        isToolboxAuthorityReplyAnswering(authorityForSendButtonView)
         || authorityForSendButtonView.reply.busy === true
         || authorityForSendButtonView.composer.hasRealStopButton === true
+      ) && !authorityForSendButtonView.composer.composerUploading;
+      const shouldDisableSendMessageButton = !!(
+        !canSendNowForButton && !replyAnsweringOnly
         || authorityForSendButtonView.composer.composerUploading === true
       );
+      const sendMessageClickBlocked = !canSendNowForButton && replyAnsweringOnly;
 
       ToolboxShell.appendLog(
         `[SEND_BUTTON][AUTHORITY_VIEW] `
@@ -40382,6 +40582,7 @@
         + `hasSendButton=${authorityForSendButtonView.composer.hasRealSendButton ? 1 : 0} `
         + `stop=${authorityForSendButtonView.composer.hasRealStopButton ? 1 : 0} `
         + `disabled=${shouldDisableSendMessageButton ? 1 : 0} `
+        + `clickBlocked=${sendMessageClickBlocked ? 1 : 0} `
         + `sendPhase=${sendPhase || '-'}`,
       );
 
@@ -40505,9 +40706,7 @@
             : '当前没有可发送内容，或 ChatGPT 正在回答/附件处理中';
         const disabledText = authorityForSendButtonView.composer.composerUploading
           ? '附件处理中'
-          : isToolboxAuthorityReplyAnswering(authorityForSendButtonView)
-            ? '回答中'
-            : '发送消息';
+          : '发送消息';
 
         button.dataset.action = 'send-message';
         setSendMessageButtonVisualState(button, false, '');
@@ -40534,6 +40733,40 @@
         }
         finalizeSendButtonStateFromTask(reason);
         return disabledResult;
+      }
+
+      if (sendMessageClickBlocked) {
+        button.dataset.action = 'send-message';
+        setSendMessageButtonVisualState(button, false, '');
+        applyPlainSendMessageClickGateOnButton(
+          button,
+          authorityForSendButtonView,
+          `${reason}:reply-answering-click-blocked`,
+        );
+        if (typeof ButtonState !== 'undefined' && ButtonState && typeof ButtonState.applyDisabledVisualOnlyState === 'function') {
+          ButtonState.applyDisabledVisualOnlyState(button, false, reason);
+        }
+        const clickBlockedResult = setButtonIdle(button, '发送消息', {
+          title: 'ChatGPT 正在回答，请等待完成后再发送',
+          reason: `${reason}:reply-answering-click-blocked`,
+        });
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_BUTTON][VISUAL_DECIDE] `
+          + `runId=${sendMessageTaskState.runId || '-'} `
+          + `owner=${sendMessageTaskState.ownerButtonId || '-'} `
+          + `phase=${sendPhase || '-'} `
+          + `plainSend=1 `
+          + `running=${sendMessageTaskState.running ? 1 : 0} `
+          + `response_state=${authorityForSendButtonView.reply.state || '-'} `
+          + `replyBusy=${authorityForSendButtonView.reply.busy ? 1 : 0} `
+          + `can_send_now=${canSendNowForButton ? 1 : 0} `
+          + `blockedBecauseAnswering=1 `
+          + `clickBlocked=1 `
+          + `danger=0 `
+          + `visualDim=0`,
+        );
+        finalizeSendButtonStateFromTask(reason);
+        return clickBlockedResult;
       }
 
       button.dataset.action = 'send-message';
@@ -44850,6 +45083,27 @@
       }
 
       ToolboxShell.appendLog(`[SEND_MESSAGE][CLICK] source=${logSource} rawSource=${rawSource}`);
+
+      if (
+        options.button
+        && options.button.dataset
+        && options.button.dataset.clickBlocked === '1'
+      ) {
+        const authorityForClickBlocked = getToolboxAuthorityState('send-message-click-blocked', {
+          force: true,
+        });
+        const blockedResponseState = authorityForClickBlocked.reply.state || '-';
+        ToolboxShell.appendLog(
+          `[SEND_MESSAGE_BUTTON][CLICK_BLOCKED] `
+          + `reason=not_sendable `
+          + `response_state=${blockedResponseState} `
+          + `replyBusy=${authorityForClickBlocked.reply.busy ? 1 : 0} `
+          + `can_send_now=${isToolboxAuthorityCanSendNow(authorityForClickBlocked) ? 1 : 0}`,
+        );
+        setStatus('ChatGPT 正在回答，请等待完成后再发送', 'warn');
+        return false;
+      }
+
       ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${logSource}`);
 
       const authorityForSendClick = getToolboxAuthorityState('send-message-click', {
@@ -48100,23 +48354,14 @@
       const sendBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
 
       if (sendBtn) {
-        let runtimeAction = resolveUploadButtonRuntimeAction(sendBtn, 'send-message');
-        if (
-          sendMessageTaskState.running
-          && isSendTaskWaitingComposerPhase()
-          && (runtimeAction === 'cancel-send' || runtimeAction === 'cancel')
-        ) {
-          ToolboxShell.appendLog(
-            `[SEND_HOTKEY][FORCE_SEND_MESSAGE] source=${src} phase=${sendMessageTaskState.phase || '-'} runtimeAction=${runtimeAction}`,
-          );
-          runtimeAction = 'send-message';
-        }
-        dispatchToolboxActionSafe(runtimeAction, {
-          button: sendBtn,
-          source: src,
+        return dispatchShortcutAsToolbarButtonClick(
+          'send-message',
           event,
-        });
-        return true;
+          src,
+          {
+            button: sendBtn,
+          },
+        );
       }
 
       void triggerSendFromToolbox(src)
@@ -48296,12 +48541,30 @@
 
         const sendBtn = rootElRef ? qs(UploadSelectors.sendMessageBtn, rootElRef) : null;
         if (sendBtn) {
-          dispatchToolboxActionSafe('send-message', {
-            button: sendBtn,
-            source: enterSource,
-            event: e,
-          });
-          releaseEnterSendLock();
+          try {
+            dispatchShortcutAsToolbarButtonClick(
+              'send-message',
+              e,
+              enterSource,
+              {
+                button: sendBtn,
+              },
+            );
+          } catch (error) {
+            const errText = error && error.message ? error.message : String(error);
+            const errStack = error && error.stack ? String(error.stack) : '';
+            console.error('[TOOLBOX_HOTKEY][enter-send-button-equivalent-failed]', error);
+            ToolboxShell.appendLog(
+              `[TOOLBOX_HOTKEY][enter-send-button-equivalent-failed] `
+              + `source=${enterSource} `
+              + `error=${errText} `
+              + `stack=${errStack || '-'}`,
+            );
+            setStatus(`Enter 发送失败：${errText}`, 'error');
+            resetUploadSendShortcutState('enter-hotkey-button-equivalent-catch', state.autoSendRunId);
+          } finally {
+            releaseEnterSendLock();
+          }
           return true;
         }
 
@@ -48464,11 +48727,11 @@
 
       ToolboxShell.appendLog('[SHORTCUT][UPLOAD_START_TRIGGER]');
 
-      void runStartUploadButtonCore({ source: 'shortcut-start-upload' }).catch((err) => {
-        const errText = err && err.message ? err.message : String(err);
-        console.error('[ChatGPT toolbox] upload start shortcut failed', err);
-        ToolboxShell.appendLog(`[SHORTCUT][UPLOAD_START_FAILED] error=${errText}`);
-      });
+      dispatchShortcutAsToolbarButtonClick(
+        'start-upload',
+        e,
+        `shortcut-start-upload:${source || 'document'}`,
+      );
     }
 
     function bindUploadStartShortcut() {
@@ -52483,6 +52746,142 @@
       return qs(entry.selector, rootElRef);
     }
 
+    function dispatchShortcutAsToolbarButtonClick(action, event, source = 'shortcut', options = {}) {
+      const src = String(source || 'shortcut').trim() || 'shortcut';
+      const opts = options && typeof options === 'object' ? options : {};
+      const rawAction = String(action || '').trim();
+      if (!rawAction) {
+        ToolboxShell.appendLog(
+          `[SHORTCUT][BUTTON_EQUIVALENT_SKIP] source=${src} reason=empty-action`,
+        );
+        return true;
+      }
+      const canonicalAction = (
+        typeof ToolboxActionRegistry !== 'undefined'
+        && ToolboxActionRegistry
+        && typeof ToolboxActionRegistry.normalizeAction === 'function'
+      )
+        ? ToolboxActionRegistry.normalizeAction(rawAction)
+        : rawAction;
+      const handlerAction = (
+        typeof ToolboxActionRegistry !== 'undefined'
+        && ToolboxActionRegistry
+        && typeof ToolboxActionRegistry.resolveHandlerAction === 'function'
+      )
+        ? ToolboxActionRegistry.resolveHandlerAction(canonicalAction)
+        : canonicalAction;
+      let entry = null;
+      if (
+        typeof ToolboxActionRegistry !== 'undefined'
+        && ToolboxActionRegistry
+        && typeof ToolboxActionRegistry.findRegistryEntryByAction === 'function'
+      ) {
+        entry = ToolboxActionRegistry.findRegistryEntryByAction(canonicalAction);
+      }
+      let button = null;
+      if (opts.button instanceof HTMLElement) {
+        button = opts.button;
+      }
+      if (!button && entry && entry.selector) {
+        if (rootElRef) {
+          button = qs(entry.selector, rootElRef);
+        }
+        if (!button && typeof document !== 'undefined') {
+          button = document.querySelector(entry.selector);
+        }
+      }
+      if (!button && entry && entry.id && typeof document !== 'undefined') {
+        button = document.getElementById(entry.id);
+      }
+      if (!(button instanceof HTMLElement)) {
+        ToolboxShell.appendLog(
+          `[SHORTCUT][BUTTON_EQUIVALENT_SKIP] `
+          + `source=${src} `
+          + `action=${rawAction || '-'} `
+          + `canonical=${canonicalAction || '-'} `
+          + `handler=${handlerAction || '-'} `
+          + `reason=button-not-found`,
+        );
+        setStatus(`快捷键对应按钮未找到：${canonicalAction || rawAction}`, 'warn', {
+          persist: false,
+          ttlMs: 1800,
+          hideTopAlert: true,
+          hideHeaderBadge: true,
+        });
+        return true;
+      }
+      const runtimeAction = resolveUploadButtonRuntimeAction(button, canonicalAction || handlerAction || rawAction);
+      const finalAction = runtimeAction || handlerAction || canonicalAction || rawAction;
+      const buttonId = String(button.id || '').trim();
+      const buttonText = String(button.textContent || '').trim();
+      const domAction = String(button.dataset.action || '').trim();
+      const baseAction = String(button.dataset.cgptBaseAction || '').trim();
+      const cgptRuntimeAction = String(
+        button.dataset.cgptRuntimeAction
+        || button.dataset.cgptButtonAction
+        || '',
+      ).trim();
+      const allowDisabledRuntimeAction = finalAction === 'cancel-send'
+        || finalAction === 'cancel-wait-reply'
+        || finalAction === 'cancel-send-copy-hotkey'
+        || finalAction === 'cancel-upload'
+        || finalAction === 'stop'
+        || finalAction === 'stop-closed-loop';
+      if (button.disabled && !allowDisabledRuntimeAction) {
+        ToolboxShell.appendLog(
+          `[SHORTCUT][BUTTON_EQUIVALENT_SKIP] `
+          + `source=${src} `
+          + `action=${rawAction || '-'} `
+          + `canonical=${canonicalAction || '-'} `
+          + `handler=${handlerAction || '-'} `
+          + `finalAction=${finalAction || '-'} `
+          + `buttonId=${buttonId || '-'} `
+          + `text=${buttonText || '-'} `
+          + `domAction=${domAction || '-'} `
+          + `baseAction=${baseAction || '-'} `
+          + `runtimeAction=${cgptRuntimeAction || '-'} `
+          + `reason=button-disabled`,
+        );
+        return true;
+      }
+      ToolboxShell.appendLog(
+        `[SHORTCUT][BUTTON_EQUIVALENT_DISPATCH] `
+        + `source=${src} `
+        + `action=${rawAction || '-'} `
+        + `canonical=${canonicalAction || '-'} `
+        + `handler=${handlerAction || '-'} `
+        + `finalAction=${finalAction || '-'} `
+        + `buttonId=${buttonId || '-'} `
+        + `text=${buttonText || '-'} `
+        + `disabled=${button.disabled ? 1 : 0} `
+        + `domAction=${domAction || '-'} `
+        + `baseAction=${baseAction || '-'} `
+        + `runtimeAction=${cgptRuntimeAction || '-'}`,
+      );
+      try {
+        dispatchToolboxActionSafe(finalAction, {
+          button,
+          source: src,
+          event,
+        });
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        const stack = error && error.stack ? String(error.stack) : '';
+        console.error('[SHORTCUT][BUTTON_EQUIVALENT_DISPATCH_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[SHORTCUT][BUTTON_EQUIVALENT_DISPATCH_FAILED] `
+          + `source=${src} `
+          + `action=${rawAction || '-'} `
+          + `finalAction=${finalAction || '-'} `
+          + `buttonId=${buttonId || '-'} `
+          + `message=${message} `
+          + `stack=${stack || '-'}`,
+        );
+        setStatus(`快捷键触发失败：${message}`, 'error');
+      }
+      return true;
+    }
+
     let toolboxInfrastructureRegistered = false;
 
     function ensureToolboxInfrastructureRegistered() {
@@ -52560,33 +52959,30 @@
       if (typeof ToolboxShortcutRegistry.registerShortcutDispatcher === 'function') {
         ToolboxShortcutRegistry.registerShortcutDispatcher((entry, event, source) => {
           const src = String(source || 'document').trim() || 'document';
-          if (entry.configKey === 'sendMessage') {
-            if (typeof shouldIgnoreSendShortcutTarget === 'function' && shouldIgnoreSendShortcutTarget(event)) {
-              return;
-            }
-            dispatchSendMessageShortcut(`registry:${src}`, event);
+          if (!entry || typeof entry !== 'object') {
+            ToolboxShell.appendLog(
+              `[SHORTCUT][REGISTRY_DISPATCH_SKIP] source=${src} reason=empty-entry`,
+            );
             return;
           }
-          if (entry.configKey === 'sendCopyAndHotkeyOnce') {
-            handleSendCopyAndHotkeyShortcut(event, `registry:${src}`);
+          if (
+            entry.configKey === 'sendMessage'
+            && typeof shouldIgnoreSendShortcutTarget === 'function'
+            && shouldIgnoreSendShortcutTarget(event)
+          ) {
+            ToolboxShell.appendLog(
+              `[SHORTCUT][REGISTRY_DISPATCH_SKIP] source=${src} configKey=sendMessage reason=ignore-send-target`,
+            );
             return;
           }
-          if (entry.configKey === 'copyAndHotkeyOnce') {
-            void handleCopyHotkeyOnceTrigger('shortcut', event);
-            return;
-          }
-          if (entry.configKey === 'startUpload') {
-            handleUploadStartShortcutKeydown(event, `registry:${src}`);
-            return;
-          }
-          const btn = resolveShortcutButtonForAction(entry.action);
-          if (btn) {
-            dispatchToolboxActionSafe(entry.handlerAction || entry.action, {
-              button: btn,
-              source: `shortcut:${entry.configKey}:${src}`,
-              event,
-            });
-          }
+          dispatchShortcutAsToolbarButtonClick(
+            entry.action,
+            event,
+            `shortcut:${entry.configKey || 'unknown'}:${src}`,
+            {
+              registryEntry: entry,
+            },
+          );
         });
       }
 
@@ -52776,6 +53172,24 @@
         const src = ctx && ctx.source ? ctx.source : 'unknown';
         const rawSource = ctx && ctx.rawSource ? ctx.rawSource : src;
         const sendBtnForCtx = ctx && ctx.button instanceof HTMLElement ? ctx.button : null;
+        if (
+          sendBtnForCtx
+          && sendBtnForCtx.dataset
+          && sendBtnForCtx.dataset.clickBlocked === '1'
+        ) {
+          const authorityForClickBlocked = getToolboxAuthorityState('send-message-ui-click-blocked', {
+            force: true,
+          });
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE_BUTTON][CLICK_BLOCKED] `
+            + `reason=not_sendable `
+            + `response_state=${authorityForClickBlocked.reply.state || '-'} `
+            + `replyBusy=${authorityForClickBlocked.reply.busy ? 1 : 0} `
+            + `can_send_now=${isToolboxAuthorityCanSendNow(authorityForClickBlocked) ? 1 : 0}`,
+          );
+          setStatus('ChatGPT 正在回答，请等待完成后再发送', 'warn');
+          return false;
+        }
         if (sendMessageTaskState.running) {
           const runningDetail = buildSendTaskTriggerDetail({
             action: 'send-message',
@@ -52899,7 +53313,7 @@
           paintSendMessageButtonWaitingImmediately(`send-message:manual-click-immediate:${src}`);
         }
 
-        void triggerSendFromToolbox(src, { rawSource }).catch((err) => {
+        void triggerSendFromToolbox(src, { rawSource, button: sendBtnForCtx }).catch((err) => {
           const errText = err && err.message ? err.message : String(err);
           console.error('[ChatGPT toolbox] send message UI action failed', err);
           setStatus(`发送信息失败：${errText}`, 'error');
@@ -56050,7 +56464,11 @@
           state.moduleInitState = 'ready';
           state.moduleInitError = '';
           state.moduleRenderFailed = false;
-          if (typeof globalThis !== 'undefined' && globalThis.ToolboxModuleHealth && typeof globalThis.ToolboxModuleHealth.report === 'function') {
+          if (
+            typeof globalThis !== 'undefined'
+            && globalThis.ToolboxModuleHealth
+            && typeof globalThis.ToolboxModuleHealth.report === 'function'
+          ) {
             globalThis.ToolboxModuleHealth.report('UploadModule', {
               ok: true,
               reason: 'upload-init-ready',
@@ -56062,7 +56480,38 @@
             `[UPLOAD_GLOBAL_SYNC][init] globalActiveGroupId=${getGlobalUploadActiveGroupId() || '-'} activeGroupId=${state.activeGroupId || '-'} queue=${getActiveGroupFiles().length}`,
           );
           ToolboxShell.appendLog('[UPLOAD_DIAG][blob-cache-enabled] upload blob persistence enabled');
-      appendUploadGroupLog('INIT', { stage: 'pipeline-complete', reason: reason || '-' });
+          // 关键修复：
+          // 前面 render() 发生时 moduleReady 还是 false，开始上传按钮可能已经被渲染成 disabled 暗色。
+          // 现在 moduleReady=true 后，必须立即强制刷新上传按钮，不能等下一轮轮询。
+          const readyStartBtn = rootElRef
+            ? qs(UploadSelectors.startBtn, rootElRef)
+            : document.querySelector(UploadSelectors.startBtn);
+          if (readyStartBtn) {
+            applyStartUploadButtonState(readyStartBtn, {
+              reason: 'upload-init-ready:refresh-start-upload-button',
+              ignoreAutoQueueRunning: true,
+            });
+          }
+          const readyAutoqStartUploadBtn = document.querySelector('#cgpt-autoq-start-upload');
+          if (
+            readyAutoqStartUploadBtn
+            && readyAutoqStartUploadBtn !== readyStartBtn
+          ) {
+            applyStartUploadButtonState(readyAutoqStartUploadBtn, {
+              reason: 'upload-init-ready:refresh-autoq-start-upload-button',
+              ignoreAutoQueueRunning: true,
+            });
+          }
+          renderUploadButtonsOnly({
+            buttonTasksReason: 'upload-init-ready:force-refresh-upload-button',
+            scope: 'upload-only',
+            force: true,
+            immediate: true,
+          });
+          ToolboxShell.appendLog(
+            `[UPLOAD_INIT][READY_REFRESH_BUTTONS] moduleReady=1 moduleInitState=${state.moduleInitState} activeFiles=${getActiveGroupFiles().length}`,
+          );
+          appendUploadGroupLog('INIT', { stage: 'pipeline-complete', reason: reason || '-' });
         })
         .catch((err) => {
           const errName = err && err.name ? err.name : 'Error';

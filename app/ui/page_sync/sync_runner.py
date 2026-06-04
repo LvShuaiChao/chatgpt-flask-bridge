@@ -17,18 +17,27 @@ def run_page_sync_update(
     bridge_connected: bool = True,
 ) -> PageSyncState:
     """Apply bridge payload to PageSyncState; optional render callback (no send/enqueue)."""
-    logger.info("[PAGE_SYNC_RUNNER][START] page_id=%s", payload.get("page_id") or "-")
+    logger.info(
+        "[PAGE_SYNC_RUNNER][START] page_display_id=%s page_instance_id=%s",
+        payload.get("page_display_id") or payload.get("page_no") or payload.get("page_id") or "-",
+        payload.get("page_instance_id") or "-",
+    )
     try:
         state = parse_page_snapshot(payload)
         logger.info(
-            "[PAGE_SYNC_RUNNER][UPDATE] page_id=%s conversation_id=%s",
-            state.page_id,
+            "[PAGE_SYNC_RUNNER][UPDATE] page_display_id=%s page_instance_id=%s conversation_id=%s",
+            state.page_display_id,
+            state.page_instance_id,
             state.conversation_id,
         )
         diagnose_sync_target(payload, bridge_connected=bridge_connected)
         if render_fn is not None:
             render_fn(state, payload)
-        logger.info("[PAGE_SYNC_RUNNER][FINISH] page_id=%s", state.page_id)
+        logger.info(
+            "[PAGE_SYNC_RUNNER][FINISH] page_display_id=%s page_instance_id=%s",
+            state.page_display_id,
+            state.page_instance_id,
+        )
         return state
     except Exception as exc:
         logger.exception("[PAGE_SYNC_RUNNER][FAILED] error=%s", exc)

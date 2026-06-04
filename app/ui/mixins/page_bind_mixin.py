@@ -554,7 +554,15 @@ class PageBindMixin(
     def _hint_after_manual_bind(self, client_info):
         profile = self._tm_client_sync_profile(client_info)
         if profile.get("sync_ok") or profile.get("sync_readable"):
-            if profile.get("send_now_available") or profile.get("send_requestable"):
+            send_decision = str(profile.get("send_decision") or "").strip().lower()
+            can_send_now = bool(
+                profile.get(
+                    "can_send_now",
+                    profile.get("send_now_available", False),
+                )
+            )
+            send_requestable = bool(profile.get("send_requestable"))
+            if can_send_now or send_decision in ("allowed", "queued") or send_requestable:
                 return "当前对话已绑定所选页面"
             return "已绑定；可同步读取网页对话，发送需等待生成结束。"
         if not profile.get("online"):
@@ -812,7 +820,9 @@ class PageBindMixin(
             f"url={url or '-'} "
             f"target_source={target_source or '-'} "
             f"send_requestable={'yes' if cap.send_requestable else 'no'} "
-            f"send_now_available={'yes' if cap.send_now_available else 'no'} "
+            f"can_send_now={'yes' if cap.send_now_available else 'no'} "
+            f"send_decision={cap.send_decision or '-'} "
+            f"legacy_send_now_available={'yes' if cap_page.get('send_now_available') else 'no' if 'send_now_available' in cap_page else '-'} "
             f"send_queueable={'yes' if cap.send_queueable else 'no'} "
             + log_page_decision_fields(cap_dict),
             echo=True,

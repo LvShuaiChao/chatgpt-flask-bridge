@@ -49,6 +49,15 @@ class TaskStep:
     index: int = 0
 
 
+BUSY_RESPONSE_STATES_FOR_ACTION_MODEL = {
+    "responding",
+    "generating",
+    "streaming",
+    "assistant_busy",
+    "busy",
+}
+
+
 @dataclass
 class PageSnapshot:
     client_id: str = ""
@@ -67,15 +76,36 @@ class PageSnapshot:
     def from_dict(cls, data: Any) -> "PageSnapshot":
         if not isinstance(data, dict):
             return cls()
+        response_state = str(data.get("response_state") or "").strip().lower()
+        if not response_state:
+            response_state = "unknown"
+        legacy_is_responding = bool(data.get("is_responding"))
+        derived_is_responding = (
+            response_state in BUSY_RESPONSE_STATES_FOR_ACTION_MODEL
+            or (
+                response_state == "unknown"
+                and legacy_is_responding
+            )
+        )
         return cls(
             client_id=str(data.get("client_id") or "").strip(),
             page_instance_id=str(data.get("page_instance_id") or "").strip(),
             conversation_id=str(data.get("conversation_id") or "").strip(),
             url=str(data.get("url") or "").strip(),
-            response_state=str(data.get("response_state") or "").strip(),
-            is_responding=bool(data.get("is_responding")),
-            can_send_now=bool(data.get("can_send_now")),
-            can_accept_input=bool(data.get("can_accept_input")),
+            response_state=response_state,
+            is_responding=derived_is_responding,
+            can_send_now=bool(
+                data.get(
+                    "can_send_now",
+                    data.get("send_now_available", False),
+                )
+            ),
+            can_accept_input=bool(
+                data.get(
+                    "can_accept_input",
+                    data.get("inputable", False),
+                )
+            ),
             visibility_state=str(data.get("visibility_state") or "").strip(),
             has_focus=bool(data.get("has_focus")),
             extra={
@@ -90,7 +120,9 @@ class PageSnapshot:
                     "response_state",
                     "is_responding",
                     "can_send_now",
+                    "send_now_available",
                     "can_accept_input",
+                    "inputable",
                     "visibility_state",
                     "has_focus",
                 }

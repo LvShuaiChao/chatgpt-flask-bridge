@@ -6,7 +6,7 @@ import time
 
 from app.models import normalize_remote_chatgpt
 
-from app.utils.page_status import get_page_liveness, is_page_online
+from app.utils.page_status import get_page_liveness, is_page_online, page_url_from
 
 from PyQt5.QtCore import Qt
 
@@ -908,33 +908,19 @@ class TmPageSelectorFormatMixin:
 
             liveness = get_page_liveness(page, now=now)
 
+            raw_url = page_url_from(page) or str(page.get("url") or "").strip()
+
             page_url = (
 
                 page.get("_normalized_url")
 
                 or (
 
-                    self._normalize_chatgpt_page_url(
+                    self._normalize_chatgpt_page_url(raw_url)
 
-                        page.get("url")
+                    if raw_url and hasattr(self, "_normalize_chatgpt_page_url")
 
-                        or page.get("normalized_url")
-
-                        or ""
-
-                    )
-
-                    if hasattr(self, "_normalize_chatgpt_page_url")
-
-                    else (
-
-                        page.get("url")
-
-                        or page.get("normalized_url")
-
-                        or ""
-
-                    )
+                    else raw_url
 
                 )
 

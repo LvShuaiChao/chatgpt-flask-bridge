@@ -38,7 +38,7 @@ from app.ui.mixins.action_orchestrator_mixin import ActionOrchestratorMixin
 from app.ui.mixins.system_hotkey_gui_mixin import SystemHotkeyGuiMixin
 from app.ui.mixins.assistant_reply_upsert_mixin import AssistantReplyUpsertMixin
 from app.ui.status_scheduler import StatusScheduler
-from app.utils.page_status import page_url_from
+from app.utils.page_status import BUSY_RESPONSE_STATES, page_url_from
 from app.utils.trace_log import kv_line, make_send_trace_id
 from app.ui.bridge.message_router import resolve_inbound_route
 from PyQt5.QtCore import QTimer
@@ -2146,7 +2146,17 @@ class BridgeMixin(ActionOrchestratorMixin, SystemHotkeyGuiMixin, AssistantReplyU
         client_info = self._client_info_by_id(client_id, self._bridge_ui.last_bridge_status)
         if not isinstance(client_info, dict):
             return True, ""
-        if client_info.get("is_responding"):
+        client_response_state = str(
+            client_info.get("response_state") or "unknown"
+        ).strip().lower()
+        client_legacy_is_responding = bool(client_info.get("is_responding"))
+        if (
+            client_response_state in BUSY_RESPONSE_STATES
+            or (
+                client_response_state == "unknown"
+                and client_legacy_is_responding
+            )
+        ):
             return True, ""
         can_accept_input = bool(client_info.get("can_accept_input", True))
         if not can_accept_input:
@@ -2188,9 +2198,19 @@ class BridgeMixin(ActionOrchestratorMixin, SystemHotkeyGuiMixin, AssistantReplyU
                 if self._pending_reply_is_actionable(session, pending):
                     return "pending_reply"
         response_state = self._session_bound_response_state(session)
-        if bool(response_state.get("is_responding")):
+        state_text = str(
+            response_state.get("response_state") or "unknown"
+        ).strip().lower()
+        legacy_is_responding = bool(response_state.get("is_responding"))
+        if (
+            state_text in BUSY_RESPONSE_STATES
+            or (
+                state_text == "unknown"
+                and legacy_is_responding
+            )
+        ):
             return "responding"
-        state = (response_state.get("response_state") or "").strip().lower()
+        state = state_text
         if state in ("generating", "waiting", "pending", "queued"):
             return state
         if self._auto_bind.pending_session_id == session.session_id:

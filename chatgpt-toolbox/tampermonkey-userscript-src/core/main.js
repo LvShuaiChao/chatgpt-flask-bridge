@@ -628,16 +628,163 @@
       }
     }
 
-    function parseTurnIdForStableCompare(turnId) {
+    function normalizeTurnIdForStableCompare(turnId) {
       const raw = String(turnId || '').trim();
       if (!raw) {
-        return 0;
+        return {
+          raw: '',
+          numeric: null,
+          isNumeric: false,
+        };
       }
       const numeric = Number(raw);
       if (Number.isFinite(numeric) && numeric > 0) {
-        return numeric;
+        return {
+          raw,
+          numeric,
+          isNumeric: true,
+        };
       }
-      return raw.length;
+      return {
+        raw,
+        numeric: null,
+        isNumeric: false,
+      };
+    }
+
+    function getPendingReplyBaselineTurnIdForStableCompare(pendingReplyContext) {
+      if (!pendingReplyContext || typeof pendingReplyContext !== 'object') {
+        return '';
+      }
+      return String(
+        pendingReplyContext.baseline_assistant_turn_id
+          || pendingReplyContext.baselineAssistantTurnId
+          || pendingReplyContext.sent_turn_id
+          || pendingReplyContext.sentTurnId
+          || '',
+      ).trim();
+    }
+
+    function getPendingReplyStartAssistantCountForStableCompare(pendingReplyContext) {
+      if (!pendingReplyContext || typeof pendingReplyContext !== 'object') {
+        return -1;
+      }
+      const raw = pendingReplyContext.start_assistant_count
+        ?? pendingReplyContext.startAssistantCount
+        ?? -1;
+      const count = Number(raw);
+      return Number.isFinite(count) ? count : -1;
+    }
+
+    function countVisibleAssistantTurnsForStableCompare() {
+      if (typeof document === 'undefined') {
+        return -1;
+      }
+      try {
+        return Array.from(
+          document.querySelectorAll('[data-message-author-role="assistant"]'),
+        ).filter((node) => node instanceof HTMLElement).length;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CHAT_PAGE][assistant-count-stable-compare-failed]', error);
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLog === 'function'
+        ) {
+          ToolboxShell.appendLog(
+            `[CHAT_PAGE][assistant-count-stable-compare-failed] error=${errText}`,
+          );
+        }
+        return -1;
+      }
+    }
+
+    function shouldSkipAssistantBeforePendingBaseline(record, pendingReplyContext) {
+      if (!pendingReplyContext || typeof pendingReplyContext !== 'object') {
+        return {
+          skip: false,
+          reason: 'no-pending-context',
+          baselineRaw: '',
+          currentRaw: '',
+          startAssistantCount: -1,
+          currentAssistantCount: -1,
+        };
+      }
+
+      const startAssistantCount = getPendingReplyStartAssistantCountForStableCompare(pendingReplyContext);
+      const currentAssistantCount = countVisibleAssistantTurnsForStableCompare();
+      const baselineRaw = getPendingReplyBaselineTurnIdForStableCompare(pendingReplyContext);
+      const currentRaw = String(record && (record.turn_id || record.turnId) || '').trim();
+      const baselineTurn = normalizeTurnIdForStableCompare(baselineRaw);
+      const currentTurn = normalizeTurnIdForStableCompare(currentRaw);
+
+      // 优先用 assistant 数量判断。
+      // 这是最简单、最符合当前按钮需求的判断：
+      // 发送前有 N 个 assistant，发送后必须出现第 N+1 个 assistant，才算新回复。
+      if (startAssistantCount >= 0 && currentAssistantCount >= 0) {
+        if (currentAssistantCount <= startAssistantCount) {
+          return {
+            skip: true,
+            reason: 'assistant-count-not-increased',
+            baselineRaw,
+            currentRaw,
+            startAssistantCount,
+            currentAssistantCount,
+          };
+        }
+        return {
+          skip: false,
+          reason: 'assistant-count-increased',
+          baselineRaw,
+          currentRaw,
+          startAssistantCount,
+          currentAssistantCount,
+        };
+      }
+
+      // 数字 turn_id 才允许大小比较。
+      if (baselineTurn.isNumeric && currentTurn.isNumeric) {
+        if (currentTurn.numeric <= baselineTurn.numeric) {
+          return {
+            skip: true,
+            reason: 'numeric-turn-before-or-equal-baseline',
+            baselineRaw,
+            currentRaw,
+            startAssistantCount,
+            currentAssistantCount,
+          };
+        }
+        return {
+          skip: false,
+          reason: 'numeric-turn-after-baseline',
+          baselineRaw,
+          currentRaw,
+          startAssistantCount,
+          currentAssistantCount,
+        };
+      }
+
+      // 非数字 turn_id 只允许判断“相等/不相等”，不能再用 raw.length 做大小比较。
+      if (baselineRaw && currentRaw && baselineRaw === currentRaw) {
+        return {
+          skip: true,
+          reason: 'same-string-turn-id-as-baseline',
+          baselineRaw,
+          currentRaw,
+          startAssistantCount,
+          currentAssistantCount,
+        };
+      }
+
+      return {
+        skip: false,
+        reason: 'no-baseline-block',
+        baselineRaw,
+        currentRaw,
+        startAssistantCount,
+        currentAssistantCount,
+      };
     }
 
     async function waitLatestAssistantStable(options = {}) {
@@ -664,15 +811,15 @@
       const pendingReplyContext = options.pendingReplyContext && typeof options.pendingReplyContext === 'object'
         ? options.pendingReplyContext
         : null;
-      const baselineTurnId = pendingReplyContext
-        ? parseTurnIdForStableCompare(
-          pendingReplyContext.baseline_assistant_turn_id
-            || pendingReplyContext.baselineAssistantTurnId
-            || pendingReplyContext.sent_turn_id
-            || pendingReplyContext.sentTurnId
-            || '',
-        )
-        : 0;
+      if (pendingReplyContext) {
+        const baselineRawForLog = getPendingReplyBaselineTurnIdForStableCompare(pendingReplyContext);
+        const startAssistantCountForLog = getPendingReplyStartAssistantCountForStableCompare(pendingReplyContext);
+        ToolboxShell.appendLog(
+          `[CHAT_PAGE][copy-last-message:baseline] `
+          + `baselineTurnId=${baselineRawForLog || '-'} `
+          + `startAssistantCount=${startAssistantCountForLog}`,
+        );
+      }
 
       const startedAt = Date.now();
       let stableCount = 0;
@@ -726,18 +873,36 @@
         }
 
         const record = picked.record;
-        const assistantTurnId = parseTurnIdForStableCompare(record.turn_id || record.turnId || '');
-
-        if (baselineTurnId > 0 && assistantTurnId > 0 && assistantTurnId <= baselineTurnId) {
+        const baselineDecision = shouldSkipAssistantBeforePendingBaseline(record, pendingReplyContext);
+        if (baselineDecision.skip) {
           stableCount = 0;
           lastSignature = '';
           lastTextChangedAt = 0;
           logStableCheckThrottled(
-            `copy-last-message:stable-check:assistant-before-baseline:${baselineTurnId}:${assistantTurnId}`,
-            `[CHAT_PAGE][copy-last-message:stable-check] state=assistant-before-baseline baseline=${baselineTurnId} current=${assistantTurnId}`,
+            `copy-last-message:stable-check:assistant-before-baseline:${baselineDecision.reason}:${baselineDecision.baselineRaw}:${baselineDecision.currentRaw}`,
+            `[CHAT_PAGE][copy-last-message:stable-check] `
+              + `state=assistant-before-baseline `
+              + `reason=${baselineDecision.reason || '-'} `
+              + `baselineTurnId=${baselineDecision.baselineRaw || '-'} `
+              + `currentTurnId=${baselineDecision.currentRaw || '-'} `
+              + `startAssistantCount=${baselineDecision.startAssistantCount} `
+              + `currentAssistantCount=${baselineDecision.currentAssistantCount}`,
           );
           await sleep(intervalMs);
           continue;
+        }
+
+        if (pendingReplyContext) {
+          logStableCheckThrottled(
+            `copy-last-message:stable-check:baseline-accepted:${baselineDecision.reason}:${baselineDecision.baselineRaw}:${baselineDecision.currentRaw}`,
+            `[CHAT_PAGE][copy-last-message:stable-check] `
+              + `state=baseline-accepted `
+              + `reason=${baselineDecision.reason || '-'} `
+              + `baselineTurnId=${baselineDecision.baselineRaw || '-'} `
+              + `currentTurnId=${baselineDecision.currentRaw || '-'} `
+              + `startAssistantCount=${baselineDecision.startAssistantCount} `
+              + `currentAssistantCount=${baselineDecision.currentAssistantCount}`,
+          );
         }
 
         const text = cleanMessageText(record.text || '');

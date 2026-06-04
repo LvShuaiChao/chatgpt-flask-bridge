@@ -847,6 +847,24 @@
     if (!(button instanceof HTMLElement)) {
       return;
     }
+    const isPlainSendMessageButton = button.id === SEND_MESSAGE_OWNER_BUTTON_ID
+      || String(action || '').trim() === 'send-message';
+    if (
+      isPlainSendMessageButton
+      && (
+        view.visualDim === false
+        || button.dataset.visualDim === '0'
+      )
+    ) {
+      button.classList.remove('cgpt-btn-disabled-visual');
+      if (
+        typeof ButtonState !== 'undefined'
+        && typeof ButtonState.applyDisabledVisualOnlyState === 'function'
+      ) {
+        ButtonState.applyDisabledVisualOnlyState(button, false, 'plain-send-no-visual-dim');
+      }
+      return;
+    }
     const disabledVisualOnly = view.disabledVisualOnly === true
       || view.disabled === true
       || button.disabled === true
@@ -1064,23 +1082,98 @@
     );
   }
 
+  function shouldPlainSendButtonShowRunningDanger(task = {}) {
+    if (!isPlainSendMessageTask(task)) {
+      return false;
+    }
+    if (!task || task.running !== true) {
+      return false;
+    }
+    return isPlainSendButtonDangerPhase(task.phase);
+  }
+
+  function resolvePlainSendMessageVisualGate(snapshot = {}, capability = {}) {
+    const cap = capability && typeof capability === 'object' ? capability : {};
+    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const responseState = String(
+      cap.response_state
+      || cap.responseState
+      || snap.response_state
+      || snap.responseState
+      || snap.replyState
+      || '',
+    ).trim().toLowerCase();
+    const replyBusy = !!(
+      isAuthorityReplyBusyForButtons(snap)
+      || isAuthorityReplyAnsweringForButtons(snap)
+      || cap.replyBusy
+      || cap.assistantBusy
+      || cap.responseBusy
+    );
+    const canSendNow = !!(
+      cap.can_send_now === true
+      || cap.canSendNow === true
+      || cap.send_decision === 'allowed'
+      || cap.sendDecision === 'allowed'
+      || snap.can_send_now === true
+      || snap.canSendNow === true
+      || snap.sendable === true
+      || snap.canSend === true
+      || (
+        snap.toolboxUnifiedAuthority
+        && snap.toolboxUnifiedAuthority.flags
+        && snap.toolboxUnifiedAuthority.flags.canSend === true
+      )
+    );
+    const blockedBecauseAnswering = (
+      responseState === 'responding'
+      || responseState === 'generating'
+      || responseState === 'streaming'
+      || replyBusy
+    );
+    const clickBlocked = !canSendNow && blockedBecauseAnswering;
+    return {
+      responseState: responseState || '-',
+      replyBusy,
+      canSendNow,
+      blockedBecauseAnswering,
+      clickBlocked,
+      visualDim: false,
+    };
+  }
+
+  function applyPlainSendMessageClickGate(button, snapshot = {}, capability = {}, reason = '') {
+    if (!button || button.id !== SEND_MESSAGE_OWNER_BUTTON_ID) {
+      return resolvePlainSendMessageVisualGate(snapshot, capability);
+    }
+    const gate = resolvePlainSendMessageVisualGate(snapshot, capability);
+    button.dataset.visualDim = '0';
+    button.dataset.clickBlocked = gate.clickBlocked ? '1' : '0';
+    button.disabled = false;
+    button.removeAttribute('disabled');
+    button.setAttribute('aria-disabled', gate.clickBlocked ? 'true' : 'false');
+    if (
+      typeof ButtonState !== 'undefined'
+      && typeof ButtonState.applyDisabledVisualOnlyState === 'function'
+    ) {
+      ButtonState.applyDisabledVisualOnlyState(button, false, reason || 'plain-send-click-gate');
+    }
+    button.classList.remove('cgpt-btn-disabled-visual');
+    button.style.opacity = '';
+    button.style.filter = '';
+    if (gate.clickBlocked) {
+      button.classList.add('cgpt-send-btn-idle');
+      button.classList.remove('cgpt-send-btn-busy');
+    }
+    return gate;
+  }
+
   function logSendMessageButtonVisualDecide(task, snapshot, capability, extra = {}) {
     const sendButtonPhase = String(task && task.phase || '').trim().toLowerCase();
     const isPlainSend = isPlainSendMessageTask(task);
     const sendButtonRunning = !!(task && task.running);
-    const shouldSendMessageButtonBeDanger = (
-      isPlainSend
-      && sendButtonRunning
-      && isPlainSendButtonDangerPhase(sendButtonPhase)
-    );
-    const responseState = String(
-      capability.response_state
-      || capability.responseState
-      || snapshot.responseState
-      || '-',
-    ).trim();
-    const replyBusy = isAuthorityReplyBusyForButtons(snapshot) ? 1 : 0;
-    const assistantBusy = isAuthorityReplyAnsweringForButtons(snapshot) ? 1 : 0;
+    const sendMessageDanger = shouldPlainSendButtonShowRunningDanger(task);
+    const gate = resolvePlainSendMessageVisualGate(snapshot, capability);
     const line = (
       `[SEND_MESSAGE_BUTTON][VISUAL_DECIDE] `
       + `runId=${(task && task.runId) || '-'} `
@@ -1088,18 +1181,21 @@
       + `phase=${sendButtonPhase || '-'} `
       + `plainSend=${isPlainSend ? 1 : 0} `
       + `running=${sendButtonRunning ? 1 : 0} `
-      + `response_state=${responseState || '-'} `
-      + `replyBusy=${replyBusy} `
-      + `assistantBusy=${assistantBusy} `
-      + `danger=${shouldSendMessageButtonBeDanger ? 1 : 0} `
-      + `reason=${extra.reason || (shouldSendMessageButtonBeDanger ? 'sending-not-submitted' : 'not-owned-by-send-button-or-submitted')}`
+      + `response_state=${gate.responseState || '-'} `
+      + `replyBusy=${gate.replyBusy ? 1 : 0} `
+      + `can_send_now=${gate.canSendNow ? 1 : 0} `
+      + `blockedBecauseAnswering=${gate.blockedBecauseAnswering ? 1 : 0} `
+      + `clickBlocked=${gate.clickBlocked ? 1 : 0} `
+      + `danger=${sendMessageDanger ? 1 : 0} `
+      + `visualDim=${gate.visualDim ? 1 : 0} `
+      + `reason=${extra.reason || (sendMessageDanger ? 'sending-not-submitted' : 'not-owned-by-send-button-or-submitted')}`
     );
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(line);
     } else {
       console.log(line);
     }
-    return shouldSendMessageButtonBeDanger;
+    return sendMessageDanger;
   }
 
   function isSendMessageButtonOwner(snapshot = {}) {
@@ -1447,6 +1543,28 @@
     return action.includes('stop')
       || action.includes('cancel')
       || text.includes('停止');
+  }
+
+  function isRuntimeCancelLikeAction(action) {
+    const normalized = String(action || '').trim().toLowerCase();
+    return normalized === 'cancel'
+      || normalized === 'stop'
+      || normalized === 'stop-closed-loop'
+      || normalized.startsWith('cancel-')
+      || normalized.startsWith('stop-');
+  }
+
+  function forceActiveButtonRedView(view = {}, ownerButtonId = '') {
+    const base = view && typeof view === 'object' ? view : {};
+    return {
+      ...base,
+      disabled: false,
+      allowCancel: base.allowCancel !== false,
+      buttonPhase: 'danger',
+      forceDanger: true,
+      preserveBaseColorWhenDisabled: false,
+      ownerButtonId: ownerButtonId || base.ownerButtonId || '',
+    };
   }
 
   function resolveUnifiedButtonVisualState(buttonConfig = {}, runtimeState = {}) {
@@ -3044,20 +3162,29 @@
           1500,
         );
       }
+      if (uploadTaskIdle) {
+        return withUploadButtonTaskKey({
+          phase: TaskPhase.IDLE,
+          text: '开始上传',
+          title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
+          disabled: false,
+          allowCancel: false,
+          action: 'start-upload',
+          buttonPhase: 'idle',
+          preserveBaseColorWhenDisabled: false,
+          disabledReason: '',
+        });
+      }
       return withUploadButtonTaskKey({
-        phase: uploadTaskIdle ? TaskPhase.IDLE : TaskPhase.DISABLED,
+        phase: TaskPhase.DISABLED,
         text: '开始上传',
-        title: uploadTaskIdle
-          ? (authorityReplyWaiting || authorityReplyAnswering
-            ? `当前状态：${statusText}；左上角状态未就绪，上传暂不可用`
-            : '左上角状态未就绪，上传暂不可用')
-          : '当前正在等待回复，禁止上传，避免打断批量任务',
+        title: '当前正在上传或上传任务未结束，请稍候',
         disabled: true,
         allowCancel: false,
-        action: uploadTaskIdle ? 'start-upload' : 'none',
-        buttonPhase: uploadTaskIdle ? 'idle' : 'disabled',
+        action: 'none',
+        buttonPhase: 'disabled',
         preserveBaseColorWhenDisabled: true,
-        disabledReason: 'send-task-running',
+        disabledReason: 'upload-task-not-idle',
       });
     }
 
@@ -3124,10 +3251,14 @@
         phase: TaskPhase.CANCELLING,
         text: '正在停止',
         title: '正在停止上传，请稍候',
-        disabled: true,
+        disabled: false,
         allowCancel: false,
         action: 'none',
-        buttonPhase: 'disabled',
+        runtimeAction: '',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        preserveBaseColorWhenDisabled: false,
+        ownerButtonId: 'cgpt-upload-start',
       });
     }
 
@@ -3175,11 +3306,15 @@
       return withUploadButtonTaskKey({
         phase: TaskPhase.UPLOADING,
         text: `${cycleLabel}自动上传中`,
-        title: '连续复制循环触发的自动上传，停止请点对应循环按钮',
-        disabled: true,
-        allowCancel: false,
-        action: 'none',
-        buttonPhase: 'waiting',
+        title: '连续复制循环触发的自动上传，当前上传任务正在执行',
+        disabled: false,
+        allowCancel: true,
+        action: 'cancel-upload',
+        runtimeAction: 'cancel-upload',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        preserveBaseColorWhenDisabled: false,
+        ownerButtonId: 'cgpt-upload-start',
       });
     }
 
@@ -3191,7 +3326,11 @@
         disabled: false,
         allowCancel: true,
         action: 'cancel-upload',
-        buttonPhase: 'running',
+        runtimeAction: 'cancel-upload',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        preserveBaseColorWhenDisabled: false,
+        ownerButtonId: 'cgpt-upload-start',
       });
     }
 
@@ -3203,7 +3342,11 @@
         disabled: false,
         allowCancel: true,
         action: 'cancel-upload',
-        buttonPhase: 'running',
+        runtimeAction: 'cancel-upload',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        preserveBaseColorWhenDisabled: false,
+        ownerButtonId: 'cgpt-upload-start',
       });
     }
     return withUploadButtonTaskKey(decorateIdleViewWithTopReplyStatus({
@@ -3914,10 +4057,14 @@
         phase: TaskPhase.CANCELLING,
         text: '正在取消',
         title: '正在取消复制+快捷键等待任务',
-        disabled: true,
+        disabled: false,
         allowCancel: false,
         action: 'none',
-        buttonPhase: 'cancelled',
+        runtimeAction: '',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        taskKey: 'copyHotkeyOnce',
+        ownerButtonId: COPY_HOTKEY_ONCE_OWNER_BUTTON_ID,
       };
     }
 
@@ -3951,6 +4098,50 @@
       };
       logCopyHotkeyButtonViewDecide(COPY_HOTKEY_ONCE_OWNER_BUTTON_ID, snapshot, ownerView);
       return ownerView;
+    }
+
+    if (onceRunning) {
+      let fallbackRunningText = '取消等待';
+      let fallbackRunningTitle = '复制+快捷键任务正在运行；点击取消';
+      if (rawPhase === TaskPhase.WAITING_REPLY) {
+        fallbackRunningText = '等待回复后复制';
+        fallbackRunningTitle = '当前 ChatGPT 正在回答，回答完成后将自动复制最后回复并发送快捷键；点击取消等待';
+      } else if (rawPhase === 'copying' || rawPhase === 'confirming_clipboard') {
+        fallbackRunningText = '正在复制';
+        fallbackRunningTitle = '正在复制最后回复';
+      } else if (rawPhase === 'sending_hotkey') {
+        fallbackRunningText = '发送快捷键中';
+        fallbackRunningTitle = '正在发送配置的快捷键';
+      }
+      const fallbackPhase = rawPhase && rawPhase !== TaskPhase.IDLE
+        ? rawPhase
+        : TaskPhase.RUNNING;
+      const fallbackOwnerView = {
+        phase: rawPhase === TaskPhase.WAITING_REPLY
+          ? TaskPhase.WAITING_REPLY
+          : fallbackPhase,
+        text: fallbackRunningText,
+        title: fallbackRunningTitle,
+        disabled: false,
+        allowCancel: true,
+        action: 'cancel-copy-hotkey-once',
+        runtimeAction: 'cancel',
+        buttonPhase: 'danger',
+        forceDanger: true,
+        taskKey: 'copyHotkeyOnce',
+        ownerButtonId: COPY_HOTKEY_ONCE_OWNER_BUTTON_ID,
+      };
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_BUTTON][OWNER_FALLBACK_RED] id=${COPY_HOTKEY_ONCE_OWNER_BUTTON_ID} phase=${rawPhase || '-'} reason=once-running-but-owner-mismatch`,
+        );
+      } else {
+        console.warn(
+          `[COPY_HOTKEY_BUTTON][OWNER_FALLBACK_RED] id=${COPY_HOTKEY_ONCE_OWNER_BUTTON_ID} phase=${rawPhase || '-'} reason=once-running-but-owner-mismatch`,
+        );
+      }
+      logCopyHotkeyButtonViewDecide(COPY_HOTKEY_ONCE_OWNER_BUTTON_ID, snapshot, fallbackOwnerView);
+      return fallbackOwnerView;
     }
 
     const capability = snapshot.capability && typeof snapshot.capability === 'object'
@@ -5840,14 +6031,14 @@
         || sendPhase === TaskPhase.WAITING_SEND
         || sendPhase === TaskPhase.WAITING_PAGE_REPLY_TO_SEND
         || sendPhase === 'waiting_ready'
-        || sendPhase === TaskPhase.CANCELLING
-        || pageReplyStatus === 'answering'
-        || pageReplyStatus === 'waiting_reply';
+        || sendPhase === TaskPhase.CANCELLING;
       reason = disabled
-        ? (pageReplyStatus === 'answering'
-          ? 'send-message-blocked-assistant-answering'
-          : `send-message-blocked-${sendPhase || pageReplyStatus}`)
-        : 'ok';
+        ? `send-message-blocked-${sendPhase || pageReplyStatus}`
+        : (
+          pageReplyStatus === 'answering' || pageReplyStatus === 'waiting_reply' || replyBusy
+            ? 'send-message-click-blocked-assistant-answering'
+            : 'ok'
+        );
     } else if (normalized === 'copy-log' || normalized === 'copy-error-log') {
       disabled = false;
       reason = 'ok';
@@ -6598,7 +6789,7 @@
           TaskPhase.DISABLED,
         ].includes(rawOwnPhase);
       const isOwnCancelView = resolvedView.allowCancel === true
-        && (runtimeAction === 'cancel' || runtimeAction === 'stop' || runtimeAction === 'stop-closed-loop')
+        && isRuntimeCancelLikeAction(runtimeAction)
         && isOwnActiveRawPhase;
       const pageReplyBlocked = isBlockedByPageReplyBusyReason(decideForRuntime.reason)
         || isBlockedByPageReplyBusyReason(decide.reason)
@@ -6640,9 +6831,34 @@
         || action === 'copy-log'
         || action === 'copy-error-log'
       ) {
-        if (decideForRuntime.disabled !== viewDisabled) {
+        const sendMessageAnsweringClickBlock = action === 'send-message'
+          && ownPhase === TaskPhase.IDLE
+          && !decideForRuntime.disabled
+          && decideForRuntime.reason === 'send-message-click-blocked-assistant-answering';
+        if (sendMessageAnsweringClickBlock) {
+          resolvedView = {
+            ...resolvedView,
+            phase: TaskPhase.IDLE,
+            disabled: false,
+            action: 'send-message',
+            runtimeAction: 'send-message',
+            buttonPhase: 'idle',
+            forceDanger: false,
+            preserveBaseColorWhenDisabled: true,
+            visualDim: false,
+            clickBlocked: true,
+            disabledVisualOnly: false,
+          };
+          logButtonViewDiagnostic('PLAIN_SEND_CLICK_BLOCKED_KEEP_GREEN', {
+            action: decideAction || action || '-',
+            reason: decideForRuntime.reason,
+          });
+        } else if (decideForRuntime.disabled !== viewDisabled) {
           const keepIdleColor = ownPhase === TaskPhase.IDLE
-            && isBlockedByPageReplyBusyReason(decideForRuntime.reason);
+            && (
+              isBlockedByPageReplyBusyReason(decideForRuntime.reason)
+              || decideForRuntime.reason === 'send-message-click-blocked-assistant-answering'
+            );
           resolvedView = {
             ...resolvedView,
             disabled: decideForRuntime.disabled,
@@ -6658,6 +6874,7 @@
               ? true
               : resolvedView.preserveBaseColorWhenDisabled,
             disabledVisualOnly: decideForRuntime.disabled === true,
+            visualDim: action === 'send-message' ? false : resolvedView.visualDim,
           };
           if (keepIdleColor) {
             logButtonViewDiagnostic('DISABLED_KEEP_IDLE_COLOR', {
@@ -6883,6 +7100,26 @@
 
     applyButtonDisabledVisualOnlyState(button, resolvedView, canonicalAction || action);
 
+    if (button.id === SEND_MESSAGE_OWNER_BUTTON_ID || canonicalAction === 'send-message') {
+      const gateCapability = snapshot.capability && typeof snapshot.capability === 'object'
+        ? snapshot.capability
+        : {};
+      const gate = applyPlainSendMessageClickGate(
+        button,
+        snapshot,
+        gateCapability,
+        reason || 'apply-upload-button-view-state',
+      );
+      logSendMessageButtonVisualDecide(
+        snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
+          ? snapshot.sendMessageTask
+          : {},
+        snapshot,
+        gateCapability,
+        { reason: `click-gate:${reason || '-'}` },
+      );
+    }
+
     const appliedPhase = normalizeTaskPhase(resolvedView.phase);
     const isSendCopyHotkeyButton = button.id === 'cgpt-send-copy-hotkey-once'
       || canonicalAction === 'send-copy-hotkey';
@@ -7020,6 +7257,11 @@
     getSendCopyHotkeyRunningTextByPhase,
     getSendLikePendingRunningText,
     getSendMessageButtonViewState,
+    isPlainSendMessageTask,
+    isPlainSendButtonDangerPhase,
+    shouldPlainSendButtonShowRunningDanger,
+    resolvePlainSendMessageVisualGate,
+    applyPlainSendMessageClickGate,
     getCopyLastReplyButtonViewState,
     getCopyHotkeyOnceButtonViewState,
     getSendCopyHotkeyButtonViewState,
