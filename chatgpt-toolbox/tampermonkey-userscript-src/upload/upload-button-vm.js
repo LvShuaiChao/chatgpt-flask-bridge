@@ -281,7 +281,7 @@
     if (!topReplyAnswering && !topReplyWaiting) {
       return view;
     }
-    const statusText = String(topReplyStatus.text || '').trim() || (topReplyAnswering ? '回答中' : '等回复');
+    const statusText = String(topReplyStatus.text || '').trim() || (topReplyAnswering ? '回答中' : '等待回复');
     return {
       ...view,
       title: options.titleWhenBusy
@@ -520,59 +520,118 @@
     void owner;
   }
 
-  function logBatchOwnerMismatch(actualOwner, source) {
+  function logButtonOwnerMismatch(expectedOwner, actualOwner, buttonId, reason) {
     const actual = actualOwner && typeof actualOwner === 'object'
       ? String(actualOwner.action || actualOwner.owner || '-')
       : String(actualOwner || '-');
-    const line = `[BUTTON_OWNER][BATCH_OWNER_MISMATCH] expected=batch-task-group actual=${actual} source=${source || '-'}`;
+    const line = `[BUTTON_OWNER][MISMATCH] expected=${expectedOwner || 'batch-task-group'} actual=${actual} button=${buttonId || '-'} reason=${reason || '-'}`;
     console.error(line);
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(line);
     }
   }
 
-  function isRuntimeBatchTaskGroupRunning(runtimeState = {}) {
-    if (
-      runtimeState.batchTaskRunning === true
-      || runtimeState.batchTaskGroupRunning === true
-      || (runtimeState.batchTask && runtimeState.batchTask.running === true)
-      || (runtimeState.batchTask && runtimeState.batchTask.phase === 'running')
-    ) {
-      return true;
-    }
-    if (
-      typeof AutoQueueModule !== 'undefined'
-      && AutoQueueModule
-      && typeof AutoQueueModule.getState === 'function'
-    ) {
-      const autoState = AutoQueueModule.getState() || {};
-      return autoState.batchTaskRunning === true;
-    }
-    return false;
+  function logBatchOwnerMismatch(actualOwner, source, buttonId) {
+    logButtonOwnerMismatch('batch-task-group', actualOwner, buttonId, source);
   }
 
-  function buildBatchTaskGroupRunningOwner(runtimeState = {}) {
-    let phase = String(
-      runtimeState.batchTask && runtimeState.batchTask.phase
-        ? runtimeState.batchTask.phase
-        : runtimeState.phase || '',
-    ).trim().toLowerCase();
-    if (
-      !phase
-      && typeof AutoQueueModule !== 'undefined'
-      && AutoQueueModule
-      && typeof AutoQueueModule.getState === 'function'
-    ) {
-      const autoState = AutoQueueModule.getState() || {};
-      phase = String(autoState.phase || 'running').trim().toLowerCase();
+  function logButtonOwnerNonOwnerSuppressed(runningOwnerAction, currentAction, buttonId) {
+    const line = `[BUTTON_OWNER][NON_OWNER_SUPPRESSED] owner=${runningOwnerAction || '-'} buttonAction=${currentAction || '-'} buttonId=${buttonId || '-'}`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+  }
+
+  function getBatchTaskGroupOwnerFromSnapshot(snapshot = {}) {
+    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const batchRunning = !!(
+      snap.batchTaskRunning === true
+      || snap.batchTaskGroupRunning === true
+      || (snap.batchTask && snap.batchTask.running === true)
+      || (snap.autoQueueState && snap.autoQueueState.batchTaskRunning === true)
+      || (
+        snap.autoQueueState
+        && snap.autoQueueState.running === true
+        && snap.autoQueueState.promptMode === 'task'
+      )
+    );
+    if (!batchRunning) {
+      if (
+        typeof AutoQueueModule !== 'undefined'
+        && AutoQueueModule
+        && typeof AutoQueueModule.getState === 'function'
+      ) {
+        const autoState = AutoQueueModule.getState() || {};
+        if (autoState.batchTaskRunning === true) {
+          return {
+            action: 'batch-task-group',
+            owner: 'batch-task-group',
+            buttonId: 'cgpt-autoq-start',
+            ownerButtonId: 'cgpt-autoq-start',
+            phase: String(autoState.phase || 'running').trim().toLowerCase() || 'running',
+            source: 'batch-task-group',
+          };
+        }
+      }
+      return null;
+    }
+    let phase = String(snap.batchTaskPhase || snap.phase || '').trim().toLowerCase();
+    if (!phase && snap.batchTask && snap.batchTask.phase) {
+      phase = String(snap.batchTask.phase).trim().toLowerCase();
     }
     return {
       action: 'batch-task-group',
+      owner: 'batch-task-group',
+      buttonId: 'cgpt-autoq-start',
+      ownerButtonId: 'cgpt-autoq-start',
       phase: phase || 'running',
+      source: 'batch-task-group',
+    };
+  }
+
+  function isRuntimeBatchTaskGroupRunning(runtimeState = {}) {
+    return !!getBatchTaskGroupOwnerFromSnapshot(runtimeState);
+  }
+
+  function buildBatchTaskGroupRunningOwner(runtimeState = {}) {
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(runtimeState);
+    if (batchOwner) {
+      return batchOwner;
+    }
+    return {
+      action: 'batch-task-group',
+      owner: 'batch-task-group',
+      phase: 'running',
       source: 'batch-task-group',
       buttonId: 'cgpt-autoq-start',
       ownerButtonId: 'cgpt-autoq-start',
     };
+  }
+
+  function getRunningOwnerFromSnapshot(snapshot = {}) {
+    return getToolboxRunningOwnerFromRuntime(snapshot);
+  }
+
+  function resolveStopVisibleFromAuthority(snapshot = {}) {
+    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const authority = snap.toolboxUnifiedAuthority;
+    if (authority && authority.composer && typeof authority.composer === 'object') {
+      const stopVisible = authority.composer.hasRealStopButton === true;
+      const line = `[SEND_BUTTON][STOP_VISIBLE_FROM_AUTHORITY] stop=${stopVisible ? 1 : 0} source=toolboxUnifiedAuthority`;
+      console.log(line);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(line);
+      }
+      return stopVisible;
+    }
+    const topReplyAnswering = isTopReplyAnsweringForButtons(snap);
+    const line = `[SEND_BUTTON][STOP_VISIBLE_FROM_AUTHORITY] stop=${topReplyAnswering ? 1 : 0} source=topReplyAnswering-fallback`;
+    console.log(line);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(line);
+    }
+    return topReplyAnswering;
   }
 
   function logButtonOwnerSuppress(action, owner, reason) {
@@ -586,28 +645,35 @@
   const CLOSED_LOOP_LOCKED_TITLE = '当前闭环运行中，暂不可用';
 
   function getToolboxRunningOwnerFromRuntime(runtimeState = {}) {
-    let resolvedOwner = null;
-    if (!isRuntimeBatchTaskGroupRunning(runtimeState)) {
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(runtimeState);
+    if (batchOwner) {
+      let resolvedOwner = null;
       if (runtimeState.runningOwner && typeof runtimeState.runningOwner === 'object') {
         resolvedOwner = runtimeState.runningOwner;
       } else if (typeof window !== 'undefined' && window.__cgptToolboxRunningOwner) {
         resolvedOwner = window.__cgptToolboxRunningOwner;
       }
-    }
-
-    if (isRuntimeBatchTaskGroupRunning(runtimeState)) {
-      const batchOwner = buildBatchTaskGroupRunningOwner(runtimeState);
       if (
         resolvedOwner
         && String(resolvedOwner.action || resolvedOwner.owner || '').trim() !== 'batch-task-group'
       ) {
-        logBatchOwnerMismatch(resolvedOwner, String(resolvedOwner.source || 'runtime-owner'));
+        logBatchOwnerMismatch(
+          resolvedOwner,
+          String(resolvedOwner.source || 'runtime-owner'),
+          String(resolvedOwner.buttonId || resolvedOwner.ownerButtonId || '-'),
+        );
       }
       logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, batchOwner.source);
       return batchOwner;
     }
 
-    return resolvedOwner;
+    if (runtimeState.runningOwner && typeof runtimeState.runningOwner === 'object') {
+      return runtimeState.runningOwner;
+    }
+    if (typeof window !== 'undefined' && window.__cgptToolboxRunningOwner) {
+      return window.__cgptToolboxRunningOwner;
+    }
+    return null;
   }
 
   function getClosedLoopOwnerFromSnapshot(snapshot = {}) {
@@ -623,6 +689,10 @@
   }
 
   function isClosedLoopOwnerAction(action, snapshot = {}) {
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(snapshot);
+    if (batchOwner) {
+      return false;
+    }
     return ClosedLoopButtonVm.isClosedLoopOwnerAction(action, snapshot);
   }
 
@@ -930,6 +1000,10 @@
   }
 
   function isSendFamilyOwner(snapshot, action) {
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(snapshot);
+    if (batchOwner) {
+      return false;
+    }
     const task = getSendFamilyTaskFromSnapshot(snapshot);
     if (!task || !task.running) {
       return false;
@@ -1301,9 +1375,6 @@
     const snapshot = getButtonAuthoritySnapshot(
       'upload-button-vm:resolveUnifiedButtonVisualState:' + kind,
     );
-    const running = snapshot.closedLoopRunning === true
-      || snapshot.pendingSend === true
-      || snapshot.sendPhase === 'waiting_send';
     const blocked = Boolean(snapshot.disabledReason);
     const runningOwner = getToolboxRunningOwnerFromRuntime(runtimeState);
     const batchTaskGroupRunning = isRuntimeBatchTaskGroupRunning(runtimeState);
@@ -1311,8 +1382,28 @@
       runningOwner
       && String(runningOwner.action || runningOwner.owner || '').trim() === 'batch-task-group'
     );
-    const closedLoopRunning = !!(runtimeState.closedLoopRunning);
+    const closedLoopRunning = !!(
+      runtimeState.closedLoopRunning
+      && !batchTaskGroupIsOwner
+    );
     const isCurrentOwner = isRunningOwnerButton({ id, action }, runningOwner);
+    const ownerPhase = runningOwner
+      ? String(runningOwner.phase || '').trim().toLowerCase()
+      : '';
+    const running = !!(
+      isCurrentOwner
+      && (
+        ownerPhase === 'running'
+        || ownerPhase === 'waiting'
+        || ownerPhase === 'waiting_reply'
+        || ownerPhase === 'waiting_page_reply_to_send'
+        || ownerPhase === 'sending'
+        || phase === 'running'
+        || phase === 'waiting'
+        || buttonPhase === 'running'
+        || buttonPhase === 'waiting'
+      )
+    );
     const isStopAction = isStopLikeButtonView(
       { action, text, runtimeAction: runtimeState.runtimeAction },
       runtimeState,
@@ -1327,20 +1418,25 @@
       batchTaskGroupRunning
       && batchTaskGroupIsOwner
       && !isCurrentOwner
-      && (isStopAction || phase === 'running' || buttonPhase === 'running' || buttonPhase === 'waiting')
     ) {
       const idleLabel = resolveIdleBusinessTextForAction(action, runtimeState);
-      logButtonOwnerSuppress(action, 'batch-task-group', 'batch-owner-non-owner-no-red');
+      logButtonOwnerSuppress(action, 'batch-task-group', 'batch-owner-non-owner-keep-base-color');
+      logButtonOwnerNonOwnerSuppressed('batch-task-group', action, id);
+      const keepBaseColorLine = `[BUTTON_OWNER][NON_OWNER_KEEP_BASE_COLOR] owner=batch-task-group buttonAction=${action || '-'} buttonId=${id || '-'}`;
+      console.log(keepBaseColorLine);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(keepBaseColorLine);
+      }
       return {
         kind,
-        enabled: false,
-        disabled: true,
+        enabled: true,
+        disabled: false,
         running: false,
-        blocked: true,
-        colorRole: 'blocked',
-        visual: 'disabled',
-        disabledReason: 'locked-by-batch-task-group-running',
-        reason: 'locked-by-batch-task-group-running',
+        blocked: false,
+        colorRole: 'normal',
+        visual: 'normal',
+        disabledReason: '',
+        reason: 'batch-owner-non-owner-keep-base-color',
         sendPhase: snapshot.sendPhase || 'unknown',
         replyBusy: snapshot.replyBusy === true,
         taskBusy: snapshot.taskBusy === true,
@@ -1350,10 +1446,13 @@
         realSendReady: snapshot.realSendReady === true,
         sendable: snapshot.sendable === true,
         inputable: snapshot.inputable === true,
-        label: idleLabel,
+        label: idleLabel || text,
         source: 'upload-button-vm:resolveUnifiedButtonVisualState',
         authoritySource: snapshot.source || '',
         ownerId: 'cgpt-autoq-start',
+        preserveBaseColorWhenDisabled: true,
+        allowCancel: false,
+        forceDanger: false,
         ts: Date.now(),
       };
     }
@@ -1493,8 +1592,8 @@
       return lockedView;
     }
 
-    let colorRole = snapshot.buttonColorRole || 'normal';
-    if (running) {
+    let colorRole = 'normal';
+    if (running && isCurrentOwner) {
       colorRole = 'running';
     }
     if (blocked) {
@@ -1502,6 +1601,18 @@
     }
 
     const phaseDisabled = phase === 'disabled' || buttonPhase === 'disabled' || runtimeState.viewDisabled === true;
+    if (!isCurrentOwner && colorRole === 'running') {
+      colorRole = 'normal';
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_OWNER][NON_OWNER_COLOR_ROLE_RESET] `
+          + `buttonAction=${action || '-'} `
+          + `buttonId=${id || '-'} `
+          + `owner=${runningOwner && (runningOwner.action || runningOwner.owner) ? String(runningOwner.action || runningOwner.owner) : '-'} `
+          + `snapshotColorRole=${snapshot.buttonColorRole || '-'}`
+        );
+      }
+    }
     const canClick = !blocked && !phaseDisabled;
     const view = {
       kind,
@@ -1510,7 +1621,7 @@
       running,
       blocked: blocked || phaseDisabled,
       colorRole,
-      visual: (blocked || phaseDisabled) ? 'disabled' : (running ? 'running' : 'normal'),
+      visual: (blocked || phaseDisabled) ? 'disabled' : (running && isCurrentOwner ? 'running' : 'normal'),
       disabledReason: phaseDisabled
         ? (runtimeState.viewDisabled ? 'view-disabled' : 'phase-disabled')
         : (snapshot.disabledReason || ''),
@@ -1547,6 +1658,11 @@
       closedLoopRunning: view.closedLoopRunning,
       pendingSend: view.pendingSend,
       realSendReady: view.realSendReady,
+      snapshotColorRole: snapshot.buttonColorRole || '-',
+      isCurrentOwner,
+      ownerAction: runningOwner && (runningOwner.action || runningOwner.owner)
+        ? String(runningOwner.action || runningOwner.owner)
+        : '-',
       costMs: Date.now() - startedAt,
     });
     return view;
@@ -1752,6 +1868,36 @@
       return view;
     }
 
+    const runningOwnerForSuppress = getRunningOwnerFromSnapshot(snapshot);
+    const runningOwnerAction = runningOwnerForSuppress
+      ? String(runningOwnerForSuppress.action || runningOwnerForSuppress.owner || '').trim()
+      : '';
+    const currentActionForSuppress = String(normalizedAction || view.action || '').trim();
+    if (
+      runningOwnerAction
+      && runningOwnerAction !== currentActionForSuppress
+      && !actionsMatchWaitingReplyOwner(currentActionForSuppress, runningOwnerAction)
+      && !isRunningOwnerButton({ id: button.id, action: currentActionForSuppress }, runningOwnerForSuppress)
+      && isRedLikeButtonView(view)
+    ) {
+      logButtonOwnerNonOwnerSuppressed(
+        runningOwnerAction,
+        currentActionForSuppress,
+        button.id || '',
+      );
+      return {
+        ...view,
+        forceDanger: false,
+        allowCancel: false,
+        buttonPhase: 'idle',
+        phase: TaskPhase.IDLE,
+        action: currentActionForSuppress || view.action,
+        runtimeAction: currentActionForSuppress || view.runtimeAction || view.action,
+        preserveBaseColorWhenDisabled: true,
+        title: view.title || '当前任务运行中',
+      };
+    }
+
     const runtimeState = {
       ...snapshot,
       phase: normalizeTaskPhase(view.phase),
@@ -1847,11 +1993,13 @@
   }
 
   function resolveAutoQueueOwnerAction(autoState = {}) {
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(autoState);
+    if (batchOwner) {
+      logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, batchOwner.source);
+      return batchOwner.action;
+    }
     if (!isAutoQueueActiveForUploadButton(autoState)) {
       return '';
-    }
-    if (autoState.batchTaskRunning === true) {
-      return 'batch-task-group';
     }
     return autoState.continueUntilDoneStrict === true
       ? 'auto-continue-until-done'
@@ -1867,6 +2015,11 @@
       return '';
     }
     const autoState = AutoQueueModule.getState() || {};
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(autoState);
+    if (batchOwner) {
+      logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, 'getCurrentAutoQueueOwnerAction');
+      return batchOwner.action;
+    }
     return resolveAutoQueueOwnerAction(autoState);
   }
 
@@ -1915,7 +2068,11 @@
   function getNormalizedSendTaskPhase(snapshot = {}) {
     const sendTask = snapshot.sendTask && typeof snapshot.sendTask === 'object'
       ? snapshot.sendTask
-      : {};
+      : (
+        snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
+          ? snapshot.sendMessageTask
+          : {}
+      );
     const rawPhase = String(sendTask.phase || TaskPhase.IDLE).trim().toLowerCase();
     const rawSubPhase = String(
       (sendTask.subPhase != null ? sendTask.subPhase : sendTask.subphase) || '',
@@ -1982,10 +2139,10 @@
 
   function resolveWaitingReplyOwner(snapshot = {}, capability = {}) {
     void capability;
-    if (isRuntimeBatchTaskGroupRunning(snapshot)) {
-      const batchOwner = buildBatchTaskGroupRunningOwner(snapshot);
-      logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, 'batch-task-group');
-      return 'batch-task-group';
+    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(snapshot);
+    if (batchOwner) {
+      logBatchOwnerPriorityUsed(batchOwner, batchOwner.phase, batchOwner.source);
+      return batchOwner.action;
     }
 
     const closedLoopRunning = snapshot.closedLoopContinueRunning === true
@@ -2042,18 +2199,38 @@
     const sendMessageTask = snapshot.sendMessageTask && typeof snapshot.sendMessageTask === 'object'
       ? snapshot.sendMessageTask
       : {};
-    const sendMessageAction = String(sendMessageTask.action || sendMessageTask.plan?.mode || '').trim();
+    const sendMessageAction = String(
+      sendMessageTask.action
+      || (sendMessageTask.plan && sendMessageTask.plan.mode)
+      || '',
+    ).trim();
+    const sendPhase = getNormalizedSendTaskPhase(snapshot);
+    const sendMessageTaskForOwnerCheck = Object.assign({}, sendMessageTask, {
+      phase: sendPhase || sendMessageTask.phase || TaskPhase.IDLE,
+    });
     if (
-      isRealSendMessageTaskRunning(sendMessageTask, snapshot, 'resolveWaitingReplyOwner:send-copy-hotkey')
-      && (sendMessageAction === 'send-copy-hotkey' || sendMessageAction === 'send-copy-hotkey-continue')
+      isRealSendMessageTaskRunning(
+        sendMessageTaskForOwnerCheck,
+        snapshot,
+        'resolveWaitingReplyOwner:send-copy-hotkey',
+      )
+      && (
+        sendMessageAction === 'send-copy-hotkey'
+        || sendMessageAction === 'send-copy-hotkey-continue'
+      )
     ) {
-      logButtonOwnerResolve(sendMessageAction, sendMessageTask.phase || 'running', 'send-message-task');
+      logButtonOwnerResolve(
+        sendMessageAction,
+        sendPhase || sendMessageTask.phase || 'running',
+        'send-message-task',
+      );
       return sendMessageAction;
     }
-
-    const sendPhase = getNormalizedSendTaskPhase(snapshot);
-    const realSendRunning = sendMessageTask.running === true
-      && !['idle', 'done', 'failed', 'cancelled', 'disabled'].includes(sendPhase);
+    const realSendRunning = isRealSendMessageTaskRunning(
+      sendMessageTaskForOwnerCheck,
+      snapshot,
+      'resolveWaitingReplyOwner:send-message',
+    );
     // waiting_reply: 已发送，等待 ChatGPT 回复
     // waiting_page_reply_to_send: 页面正在回复，消息尚未真正发送，等待页面空闲后再发
     if (
@@ -2625,7 +2802,7 @@
       ).trim().toLowerCase();
       const uploadTaskIdle = !uploadPhase || uploadPhase === 'idle' || uploadPhase === 'success';
       const statusText = String(topReplyStatus.text || '').trim()
-        || (authorityReplyAnswering ? '回答中' : '等回复');
+        || (authorityReplyAnswering ? '回答中' : '等待回复');
       const authority = getToolboxAuthorityFromSnapshot(snapshot);
       if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
         ToolboxShell.appendLogIfChanged(
@@ -2880,11 +3057,16 @@
     const sendTaskPhaseForOwner = sendTaskForOwner
       ? String(sendTaskForOwner.phase || 'idle').trim().toLowerCase()
       : 'idle';
-    const sendTaskActiveForOwner = sendTaskPhaseForOwner !== 'idle'
+    const sendTaskActiveForOwner = !!(
+      sendTaskForOwner
+      && sendTaskForOwner.running === true
+      && sendTaskPhaseForOwner !== 'idle'
+      && sendTaskPhaseForOwner !== 'done'
       && sendTaskPhaseForOwner !== 'failed'
       && sendTaskPhaseForOwner !== 'cancelled'
       && sendTaskPhaseForOwner !== 'completed'
-      && sendTaskPhaseForOwner !== 'success';
+      && sendTaskPhaseForOwner !== 'success'
+    );
     const isForeignSendFamilyOwner = !!(
       (
         sendFamilyTaskForOwner
@@ -3005,8 +3187,7 @@
       const taskPhase = String(sendMessageTask.phase || '').trim().toLowerCase();
       const action = String(sendMessageTask.action || sendMessageTask.plan?.mode || 'send-message').trim();
       const pageGenerating = authorityReplyBusy || authorityReplyAnswering || authorityReplyWaiting;
-      const stopVisible = typeof document !== 'undefined'
-        && !!document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
+      const stopVisible = resolveStopVisibleFromAuthority(snapshot);
       const isWaitingReplyPhase = taskPhase === 'sent_waiting_response'
         || taskPhase === 'stopping_response'
         || taskPhase === 'waiting_reply'
@@ -3254,8 +3435,7 @@
           buttonPhase: 'idle',
         });
       }
-      const stopVisible = typeof document !== 'undefined'
-        && !!document.querySelector('[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label*="Stop"]');
+      const stopVisible = resolveStopVisibleFromAuthority(snapshot);
       return finish({
         phase: TaskPhase.WAITING_REPLY,
         text: getSendMessageRunningTextByPhase('waiting_reply'),

@@ -91,6 +91,7 @@
     const TOOLBOX_FLOATING_HIDDEN_CLASS = 'cgpt-toolbox-floating-hidden';
 
     const TOOLBOX_PANEL_HIDDEN_STORAGE_KEY = 'xz_toolbox_panel_hidden_v1';
+    const TOOLBOX_PANEL_RECT_KEY = 'xz_toolbox_panel_rect_v1';
     const TOOLBOX_RESTORE_BUTTON_ID = 'xz-toolbox-restore-button';
 
     function readToolboxPanelHiddenState() {
@@ -151,24 +152,52 @@
         return false;
       }
 
-      panelEl.dataset.toolboxHidden = hidden ? '1' : '0';
-      panelEl.classList.toggle('cgpt-toolbox-panel-hidden', !!hidden);
+      const reasonText = String(reason || '-');
+
       if (hidden) {
+        saveToolboxPanelRect(`hide:${reasonText}`);
+        panelEl.dataset.toolboxHidden = '1';
+        panelEl.classList.add('cgpt-toolbox-panel-hidden');
         panelEl.style.display = 'none';
         if (restoreButton) {
           restoreButton.style.display = 'inline-flex';
         }
         hideRestoreHandle('header-panel-ui-hidden');
-      } else {
-        panelEl.style.display = '';
-        if (restoreButton) {
-          restoreButton.style.display = 'none';
-        }
+        writeToolboxPanelHiddenState(true);
+        appendLog(`[TOOLBOX_VISIBILITY][HIDE] reason=${reasonText}`);
+        appendLog(
+          `[TOOLBOX_UI][PANEL_HIDDEN_CHANGE] hidden=1 reason=${reasonText}`,
+        );
+        return true;
       }
-      writeToolboxPanelHiddenState(!!hidden);
+
+      panelEl.dataset.toolboxHidden = '0';
+      panelEl.classList.remove('cgpt-toolbox-panel-hidden');
+      panelEl.style.display = '';
+      panelEl.style.pointerEvents = 'auto';
+      panelEl.style.visibility = 'visible';
+      panelEl.style.opacity = '1';
+      if (restoreButton) {
+        restoreButton.style.display = 'none';
+      }
+      writeToolboxPanelHiddenState(false);
+      appendLog(`[TOOLBOX_VISIBILITY][SHOW] reason=${reasonText}`);
       appendLog(
-        `[TOOLBOX_UI][PANEL_HIDDEN_CHANGE] hidden=${hidden ? 1 : 0} reason=${String(reason || '-')}`,
+        `[TOOLBOX_UI][PANEL_HIDDEN_CHANGE] hidden=0 reason=${reasonText}`,
       );
+
+      window.requestAnimationFrame(() => {
+        if (!restoreToolboxPanelRect(`show:${reasonText}`)) {
+          applySavedPanelPosition(`show:${reasonText}`);
+        }
+        keepPanelInViewport({
+          save: true,
+          reason: `show:${reasonText}`,
+        });
+        syncToolboxFloatingLayout(`show:${reasonText}`);
+        updateFloatingTitlePosition(`show:${reasonText}`);
+      });
+
       return true;
     }
 
@@ -1636,6 +1665,78 @@
           flex: 0 0 auto !important;
           margin-left: 0 !important;
           margin-right: 0 !important;
+        }
+
+        /* 顶部状态栏统一布局：状态胶囊统一宽度和高度 */
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row {
+          display: grid !important;
+          grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+          grid-auto-rows: 22px !important;
+          gap: 3px !important;
+          align-items: center !important;
+          align-content: start !important;
+          justify-content: stretch !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          min-height: 22px !important;
+          height: auto !important;
+          overflow: visible !important;
+          white-space: nowrap !important;
+          box-sizing: border-box !important;
+          padding: 0 !important;
+        }
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row [data-top-status-slot],
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-toolbox-top-status-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-status-pill,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-stat-secondary,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-local-upload-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-local-message-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-badge,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-badge-task {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          justify-self: stretch !important;
+          align-self: center !important;
+          width: 100% !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          height: 22px !important;
+          min-height: 22px !important;
+          max-height: 22px !important;
+          line-height: 22px !important;
+          padding: 0 6px !important;
+          margin: 0 !important;
+          border-radius: 999px !important;
+          font-size: 12px !important;
+          font-weight: 700 !important;
+          letter-spacing: 0 !important;
+          box-sizing: border-box !important;
+          overflow: hidden !important;
+          white-space: nowrap !important;
+          text-overflow: ellipsis !important;
+          flex: none !important;
+          font-variant-numeric: tabular-nums !important;
+        }
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-top-status-badge.is-hidden-placeholder,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row .cgpt-toolbox-top-status-badge.is-hidden-placeholder,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row [data-top-status-slot="alert-state"].is-hidden-placeholder {
+          display: none !important;
+          visibility: hidden !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          max-width: 0 !important;
+          height: 0 !important;
+          min-height: 0 !important;
+          max-height: 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          border: 0 !important;
+        }
+        #${APP.panelId}.cgpt-toolbox-extra-narrow .cgpt-toolbox-header-status-row.cgpt-top-status-row {
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
         }
 
         #${APP.panelId} .cgpt-toolbox-header-status-row .cgpt-toolbox-page-id-badge {
@@ -6241,10 +6342,46 @@
       viewportGuardBound = true;
 
       window.addEventListener('resize', () => {
-        scheduleClampRootToViewport('window-resize', {
-          save: !isPanelHiddenNow(),
-          allowEdgeHidden: true,
-        });
+        const panelEl = getToolboxPanelElementForRect();
+        const saved = loadToolboxPanelRect('window-resize');
+
+        if (panelEl && saved && isPanelVisibleNow()) {
+          const rect = clampToolboxPanelRect(saved);
+          applyPanelRect(rect);
+          panelEl.dataset.userPositionLocked = '1';
+
+          const payload = {
+            ...rect,
+            savedAt: Date.now(),
+            reason: 'window-resize-clamp',
+          };
+          lastPanelVisibleRect = {
+            ...payload,
+            right: rect.left + rect.width,
+            bottom: rect.top + rect.height,
+            updatedAt: payload.savedAt,
+          };
+
+          try {
+            localStorage.setItem(TOOLBOX_PANEL_RECT_KEY, JSON.stringify(payload));
+          } catch (error) {
+            console.error('[TOOLBOX_POSITION][RESIZE_CLAMP_WRITE_ERROR]', {
+              message: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
+          }
+
+          console.info('[TOOLBOX_POSITION][RESIZE_CLAMP]', { applied: rect });
+          appendLog(
+            `[TOOLBOX_POSITION][RESIZE_CLAMP] left=${rect.left} top=${rect.top} width=${rect.width} height=${rect.height}`,
+          );
+        } else {
+          scheduleClampRootToViewport('window-resize', {
+            save: !isPanelHiddenNow(),
+            allowEdgeHidden: true,
+          });
+        }
+
         window.setTimeout(() => {
           syncToolboxFloatingLayout('window-resize');
           repairInvisibleToolboxState('window-resize');
@@ -6678,7 +6815,9 @@
           root.dataset.snapEdge = savedSnapEdge;
 
           if (!hidden && !isEdgeHidden()) {
-            const savedPositionApplied = applySavedPanelPosition('applyToolboxUiState');
+            const restoredFromRect = restoreToolboxPanelRect('applyToolboxUiState');
+            const savedPositionApplied = restoredFromRect
+              || applySavedPanelPosition('applyToolboxUiState');
 
             if (!savedPositionApplied) {
               applyPanelPosition(
@@ -6706,7 +6845,8 @@
       window.requestAnimationFrame(() => {
         window.setTimeout(() => {
           if (!hidden && !isEdgeHidden()) {
-            const restoredAgain = applySavedPanelPosition('applyToolboxUiState-final');
+            const restoredAgain = restoreToolboxPanelRect('applyToolboxUiState-final')
+              || applySavedPanelPosition('applyToolboxUiState-final');
 
             if (restoredAgain) {
               appendLog('[TOOLBOX_POSITION][RESTORE_GLOBAL_FINAL] reason=applyToolboxUiState-final');
@@ -9226,6 +9366,7 @@
       panel.style.top = `${Math.round(safe.top)}px`;
       panel.style.right = 'auto';
       panel.style.bottom = 'auto';
+      panel.dataset.userPositionLocked = '1';
 
       if (root) {
         root.style.position = 'fixed';
@@ -9594,34 +9735,222 @@
       });
     }
 
-    function rememberLastPanelVisibleRect(reason = '') {
-      if (!panel) return;
+    function getToolboxPanelElementForRect() {
+      return panel || document.getElementById(APP.panelId);
+    }
 
-      const hidden = panel.classList.contains('cgpt-toolbox-hidden');
+    function isToolboxPanelRectValid(rect) {
+      return !!(
+        rect
+        && Number.isFinite(rect.left)
+        && Number.isFinite(rect.top)
+        && Number.isFinite(rect.width)
+        && Number.isFinite(rect.height)
+        && rect.width > 80
+        && rect.height > 80
+      );
+    }
 
-      if (hidden && !root?.classList.contains('cgpt-toolbox-edge-revealed')) {
-        return;
+    function clampToolboxPanelRect(rect) {
+      const fitted = fitPanelRectInViewport({
+        left: Number(rect.left),
+        top: Number(rect.top),
+        width: Number(rect.width),
+        height: Number(rect.height),
+      });
+
+      return {
+        left: Math.round(fitted.left),
+        top: Math.round(fitted.top),
+        width: Math.round(fitted.width),
+        height: Math.round(fitted.height),
+      };
+    }
+
+    function loadToolboxPanelRect(reason = '') {
+      if (lastPanelVisibleRect && isToolboxPanelRectValid(lastPanelVisibleRect)) {
+        return {
+          left: Number(lastPanelVisibleRect.left),
+          top: Number(lastPanelVisibleRect.top),
+          width: Number(lastPanelVisibleRect.width),
+          height: Number(lastPanelVisibleRect.height),
+          savedAt: Number(lastPanelVisibleRect.updatedAt || 0),
+          reason: String(lastPanelVisibleRect.reason || ''),
+        };
       }
 
-      const rect = panel.getBoundingClientRect();
-
-      if (!rect || rect.width <= 0 || rect.height <= 0) {
-        return;
+      let raw = '';
+      try {
+        raw = localStorage.getItem(TOOLBOX_PANEL_RECT_KEY) || '';
+      } catch (error) {
+        console.error('[TOOLBOX_POSITION][LOAD_READ_ERROR]', {
+          reason,
+          message: error && error.message ? error.message : String(error),
+          stack: error && error.stack ? error.stack : '',
+        });
+        return null;
       }
 
-      lastPanelVisibleRect = {
+      if (!raw) {
+        console.info('[TOOLBOX_POSITION][LOAD_EMPTY]', { reason });
+        return null;
+      }
+
+      try {
+        const payload = JSON.parse(raw);
+        const valid = payload
+          && Number.isFinite(Number(payload.left))
+          && Number.isFinite(Number(payload.top))
+          && Number.isFinite(Number(payload.width))
+          && Number.isFinite(Number(payload.height))
+          && Number(payload.width) > 80
+          && Number(payload.height) > 80;
+
+        if (!valid) {
+          console.warn('[TOOLBOX_POSITION][LOAD_INVALID]', { reason, raw });
+          return null;
+        }
+
+        return {
+          left: Number(payload.left),
+          top: Number(payload.top),
+          width: Number(payload.width),
+          height: Number(payload.height),
+          savedAt: Number(payload.savedAt || 0),
+          reason: String(payload.reason || ''),
+        };
+      } catch (error) {
+        console.error('[TOOLBOX_POSITION][LOAD_PARSE_ERROR]', {
+          reason,
+          message: error && error.message ? error.message : String(error),
+          stack: error && error.stack ? error.stack : '',
+          raw,
+        });
+        return null;
+      }
+    }
+
+    function saveToolboxPanelRect(reason = '') {
+      const panelEl = getToolboxPanelElementForRect();
+      if (!panelEl) {
+        console.warn('[TOOLBOX_POSITION][SAVE_SKIP]', { reason, found: 0 });
+        return false;
+      }
+
+      if (panelEl.dataset.toolboxHidden === '1') {
+        appendLog(`[TOOLBOX_POSITION][SAVE_SKIP] reason=${reason || '-'} panelAlreadyHidden=1`);
+        return false;
+      }
+
+      if (panelEl.classList.contains('cgpt-toolbox-hidden')) {
+        appendLog(`[TOOLBOX_POSITION][SAVE_SKIP] reason=${reason || '-'} classHidden=1`);
+        return false;
+      }
+
+      const style = window.getComputedStyle(panelEl);
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        console.warn('[TOOLBOX_POSITION][SAVE_SKIP_INVALID_RECT]', {
+          reason,
+          display: style.display,
+          visibility: style.visibility,
+        });
+        return false;
+      }
+
+      const rect = panelEl.getBoundingClientRect();
+      if (!isToolboxPanelRectValid(rect)) {
+        console.warn('[TOOLBOX_POSITION][SAVE_SKIP_INVALID_RECT]', {
+          reason,
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          display: style.display,
+          visibility: style.visibility,
+        });
+        return false;
+      }
+
+      const payload = {
         left: Math.round(rect.left),
         top: Math.round(rect.top),
-        right: Math.round(rect.right),
-        bottom: Math.round(rect.bottom),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
-        updatedAt: Date.now(),
+        savedAt: Date.now(),
+        reason: String(reason || ''),
       };
 
-      appendLog(
-        `[TOOLBOX_RESTORE_HOTZONE][remember] reason=${reason || '-'} left=${lastPanelVisibleRect.left} top=${lastPanelVisibleRect.top} width=${lastPanelVisibleRect.width} height=${lastPanelVisibleRect.height}`,
+      lastPanelVisibleRect = {
+        ...payload,
+        right: Math.round(rect.right),
+        bottom: Math.round(rect.bottom),
+        updatedAt: payload.savedAt,
+      };
+
+      try {
+        localStorage.setItem(TOOLBOX_PANEL_RECT_KEY, JSON.stringify(payload));
+      } catch (error) {
+        console.error('[TOOLBOX_POSITION][SAVE_WRITE_ERROR]', {
+          reason,
+          message: error && error.message ? error.message : String(error),
+          stack: error && error.stack ? error.stack : '',
+        });
+      }
+
+      if (panelEl === panel || !panel) {
+        panel = panelEl;
+      }
+
+      savePanelPositionOnly(`save-rect:${reason || '-'}`, payload.left, payload.top);
+      savePanelSizeOnly(
+        `save-rect:${reason || '-'}`,
+        payload.width,
+        payload.height,
+        compactMode,
       );
+
+      panelEl.dataset.userPositionLocked = '1';
+
+      console.info('[TOOLBOX_POSITION][SAVE]', payload);
+      appendLog(
+        `[TOOLBOX_POSITION][SAVE] reason=${payload.reason} left=${payload.left} top=${payload.top} width=${payload.width} height=${payload.height}`,
+      );
+
+      return true;
+    }
+
+    function restoreToolboxPanelRect(reason = '') {
+      const panelEl = getToolboxPanelElementForRect();
+      if (!panelEl) {
+        console.warn('[TOOLBOX_POSITION][RESTORE_SKIP]', { reason, found: 0 });
+        return false;
+      }
+
+      const saved = loadToolboxPanelRect(reason);
+      if (!saved) {
+        console.info('[TOOLBOX_POSITION][RESTORE_DEFAULT_SKIP_NO_SAVED_RECT]', { reason });
+        return false;
+      }
+
+      if (!panel || panelEl !== panel) {
+        panel = panelEl;
+      }
+
+      const rect = clampToolboxPanelRect(saved);
+
+      applyPanelRect(rect);
+      panelEl.dataset.userPositionLocked = '1';
+
+      console.info('[TOOLBOX_POSITION][RESTORE]', { reason, saved, applied: rect });
+      appendLog(
+        `[TOOLBOX_POSITION][RESTORE] reason=${reason || '-'} left=${rect.left} top=${rect.top} width=${rect.width} height=${rect.height}`,
+      );
+
+      return true;
+    }
+
+    function rememberLastPanelVisibleRect(reason = '') {
+      saveToolboxPanelRect(reason || 'remember-last-visible-rect');
     }
 
     function ensureRestoreHotzoneElement() {
@@ -9774,51 +10103,69 @@
         return;
       }
 
-      if (isHeaderPanelUiHidden()) {
-        setToolboxPanelHidden(false, `restore-clear-header-hidden:${reason || '-'}`);
-        return;
-      }
-
       if (isDraggingToolbox || isResizingToolbox) {
         appendLog(`[TOOLBOX_RESTORE][skip] reason=${reason || '-'} dragging-or-resizing`);
         return;
       }
 
-      suspendAutoHideForForceShow(reason || 'restore', 3000);
-      clearHiddenTitlePosition(`restore:${reason || '-'}`);
+      const reasonText = String(reason || '-');
+      const headerWasHidden = isHeaderPanelUiHidden();
+
+      if (headerWasHidden) {
+        const panelEl = getToolboxPanelElementForRect();
+        if (panelEl) {
+          panelEl.dataset.toolboxHidden = '0';
+          panelEl.classList.remove('cgpt-toolbox-panel-hidden');
+        }
+        const restoreButton = document.getElementById(TOOLBOX_RESTORE_BUTTON_ID);
+        if (restoreButton) {
+          restoreButton.style.display = 'none';
+        }
+        writeToolboxPanelHiddenState(false);
+        appendLog(`[TOOLBOX_VISIBILITY][SHOW] reason=restore-clear-header-hidden:${reasonText}`);
+      }
+
+      suspendAutoHideForForceShow(reasonText || 'restore', 3000);
+      clearHiddenTitlePosition(`restore:${reasonText}`);
 
       clearEdgeRevealTimer();
 
-      clearRootEdgeState(`restore:${reason || '-'}`);
-      forcePanelVisible(`restore:${reason || '-'}`);
+      clearRootEdgeState(`restore:${reasonText}`);
+      forcePanelVisible(`restore:${reasonText}`);
 
-      const savedPos = MemoryManager.get(MemoryManager.KEYS.panelPosition, null) || {};
-      const size = normalizePanelSize(
-        MemoryManager.get(getPanelSizeMemoryKey(), null) || getPanelSizeFallback(),
-      );
+      const restoredFromSavedRect = restoreToolboxPanelRect(`restore:${reasonText}`);
+      if (!restoredFromSavedRect) {
+        const savedPos = MemoryManager.get(MemoryManager.KEYS.panelPosition, null) || {};
+        const size = normalizePanelSize(
+          MemoryManager.get(getPanelSizeMemoryKey(), null) || getPanelSizeFallback(),
+        );
 
-      let left = Number.isFinite(Number(savedPos.left))
-        ? Number(savedPos.left)
-        : window.innerWidth - size.width - PANEL_VIEWPORT_MARGIN;
+        let left = Number.isFinite(Number(savedPos.left))
+          ? Number(savedPos.left)
+          : window.innerWidth - size.width - PANEL_VIEWPORT_MARGIN;
 
-      let top = Number.isFinite(Number(savedPos.top))
-        ? Number(savedPos.top)
-        : PANEL_VIEWPORT_MARGIN;
+        let top = Number.isFinite(Number(savedPos.top))
+          ? Number(savedPos.top)
+          : PANEL_VIEWPORT_MARGIN;
 
-      left = Math.max(
-        PANEL_VIEWPORT_MARGIN,
-        Math.min(window.innerWidth - size.width - PANEL_VIEWPORT_MARGIN, left),
-      );
+        left = Math.max(
+          PANEL_VIEWPORT_MARGIN,
+          Math.min(window.innerWidth - size.width - PANEL_VIEWPORT_MARGIN, left),
+        );
 
-      top = Math.max(
-        PANEL_VIEWPORT_MARGIN,
-        Math.min(window.innerHeight - size.height - PANEL_VIEWPORT_MARGIN, top),
-      );
+        top = Math.max(
+          PANEL_VIEWPORT_MARGIN,
+          Math.min(window.innerHeight - size.height - PANEL_VIEWPORT_MARGIN, top),
+        );
 
-      applyPanelSize(size, {
-        reason: `restore-from-hidden:${reason || '-'}`,
-      });
-      applyPanelPosition(left, top);
+        applyPanelSize(size, {
+          reason: `restore-from-hidden:${reasonText}`,
+        });
+        applyPanelPosition(left, top);
+        appendLog(
+          `[TOOLBOX_POSITION][RESTORE_GLOBAL] reason=${reasonText} left=${Math.round(left)} top=${Math.round(top)}`,
+        );
+      }
 
       hideRestoreHotzone(`restore:${reason || '-'}`);
       hideRestoreHandle(`restore:${reason || '-'}`);
@@ -9826,8 +10173,11 @@
 
       syncPanelHiddenClass(`restore:${reason || '-'}`);
 
+      const showRect = panel.getBoundingClientRect();
       appendLog(
-        `[TOOLBOX_RESTORE][show] reason=${reason || '-'} left=${Math.round(left)} top=${Math.round(top)} width=${size.width} height=${size.height}`,
+        `[TOOLBOX_RESTORE][show] reason=${reasonText} restoredFromRect=${restoredFromSavedRect ? 1 : 0} ` +
+        `left=${Math.round(showRect.left)} top=${Math.round(showRect.top)} ` +
+        `width=${Math.round(showRect.width)} height=${Math.round(showRect.height)}`,
       );
 
       window.requestAnimationFrame(() => {
@@ -9835,6 +10185,10 @@
         panel.style.pointerEvents = 'auto';
         panel.style.visibility = 'visible';
         panel.style.opacity = '1';
+
+        if (!restoreToolboxPanelRect(`after-show:${reasonText}`)) {
+          applySavedPanelPosition(`after-show:${reasonText}`);
+        }
 
         keepPanelInViewport({
           save: true,
@@ -10946,8 +11300,27 @@
         return;
       }
 
+      if (panel.dataset.toolboxHidden === '1' || panel.classList.contains('cgpt-toolbox-hidden')) {
+        appendLog(`[TOOLBOX_POSITION][SAVE_DOM_SKIP] reason=${reason || '-'} panelHidden=1`);
+        return;
+      }
+
+      const style = window.getComputedStyle(panel);
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        appendLog(`[TOOLBOX_POSITION][SAVE_DOM_SKIP] reason=${reason || '-'} display=${style.display}`);
+        return;
+      }
+
       const rect = panel.getBoundingClientRect();
+      if (!isToolboxPanelRectValid(rect)) {
+        appendLog(
+          `[TOOLBOX_POSITION][SAVE_DOM_SKIP] reason=${reason || '-'} invalidRect left=${rect.left} top=${rect.top} width=${rect.width} height=${rect.height}`,
+        );
+        return;
+      }
+
       savePanelPositionOnly(reason, rect.left, rect.top);
+      saveToolboxPanelRect(`dom:${reason || '-'}`);
     }
 
     function savePanelPositionFromDom(reason = '') {
@@ -12005,11 +12378,7 @@
       if (!panel || !root) return;
 
       const reason = options.reason || 'hidePanel';
-      rememberLastPanelVisibleRect(reason);
-
-      if (options.save !== false) {
-        savePanelPositionFromDom(`${reason}:save-visible-panel`);
-      }
+      saveToolboxPanelRect(`hide:${reason}`);
 
       const anchored = anchorRootToHiddenTogglePosition(reason);
 
@@ -12684,8 +13053,7 @@
             updateFloatingTitlePosition('panel-drag-end');
           }
 
-          savePanelPositionFromDom('panel-drag-end');
-          rememberLastPanelVisibleRect('panel-drag-end');
+          saveToolboxPanelRect('user-drag-end');
           updateRestoreHotzone('panel-drag-end');
         });
 
@@ -12925,7 +13293,7 @@
 
       if (statusType === 'danger') {
         if (/等待回答/.test(value)) return '等回答';
-        if (/正在等待回复|等待回复/.test(value)) return '等回复';
+        if (/正在等待回复|等待回复/.test(value)) return '等待回复';
         if (/回答中/.test(value)) return '回答中';
         return '等待中';
       }
@@ -12966,6 +13334,7 @@
       '可输入',
       '发送中',
       '回答中',
+      '等待回复',
       '等回复',
       '等回答',
       '待发送',

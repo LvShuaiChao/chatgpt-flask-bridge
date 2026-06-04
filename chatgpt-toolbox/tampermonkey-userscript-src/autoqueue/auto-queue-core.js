@@ -1481,6 +1481,30 @@ const AutoQueueModule = (() => {
         getBatchTaskGroupButtonViewState(),
         reason || 'update-batch-task-main-button',
       );
+      const batchInput = buildBatchTaskGroupButtonStateInput();
+      if (isBatchTaskGroupRunning(batchInput)) {
+        if (typeof window !== 'undefined') {
+          const batchPhase = String(batchInput.phase || 'running').trim().toLowerCase() || 'running';
+          window.__cgptToolboxRunningOwner = {
+            owner: 'batch-task-group',
+            action: 'batch-task-group',
+            buttonId: 'cgpt-autoq-start',
+            ownerButtonId: 'cgpt-autoq-start',
+            phase: batchPhase,
+            source: `autoqueue:${reason || 'update-batch-task-main-button'}`,
+            startedAt: Date.now(),
+          };
+          ToolboxShell.appendLog(
+            `[BUTTON_OWNER][BATCH_PRIORITY_USED] owner=batch-task-group phase=${batchPhase} source=${window.__cgptToolboxRunningOwner.source}`,
+          );
+        }
+      } else if (
+        typeof window !== 'undefined'
+        && window.__cgptToolboxRunningOwner
+        && window.__cgptToolboxRunningOwner.owner === 'batch-task-group'
+      ) {
+        window.__cgptToolboxRunningOwner = null;
+      }
       if (config.promptMode === 'task') {
         btn.setAttribute('data-role', 'batch-task-main-button');
         btn.setAttribute('data-fixed-label-owner', 'batch-task');

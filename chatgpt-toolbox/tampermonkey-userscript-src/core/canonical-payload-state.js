@@ -100,11 +100,6 @@ const CanonicalPayloadState = (() => {
     let canSendPayload = true;
     let blockReason = '';
 
-    if (activeLocalFileCount > 0 && composerAttachmentCount <= 0 && composerTextLen <= 0) {
-      canSendPayload = false;
-      blockReason = 'local_queue_no_composer_attachment';
-    }
-
     if (uploading) {
       canSendPayload = false;
       if (!blockReason) {
@@ -154,11 +149,9 @@ const CanonicalPayloadState = (() => {
     return {
       blocked: true,
       snapshot,
-      message: snapshot.reason === 'local_queue_no_composer_attachment'
-        ? '本地文件还没有上传到 ChatGPT 输入框，请先点击「开始上传」，上传完成后再发送。'
-        : (snapshot.reason === 'upload_in_progress'
-          ? '正在上传文件，请等待上传完成后再发送。'
-          : '当前无法发送，请检查输入框附件与上传状态。'),
+      message: snapshot.reason === 'upload_in_progress'
+        ? '正在上传文件，请等待上传完成后再发送。'
+        : '当前无法发送，请检查输入框附件与上传状态。',
     };
   }
 

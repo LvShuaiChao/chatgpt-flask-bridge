@@ -697,7 +697,7 @@
 
           key: 'reply',
 
-          text: authority ? String(authority.task.text || '等回复') : '等回复',
+          text: authority ? String(authority.task.text || '等待回复') : '等待回复',
 
           level: 'danger',
 

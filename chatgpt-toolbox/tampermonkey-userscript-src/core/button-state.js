@@ -304,15 +304,20 @@
     const composer = authority && authority.composer ? authority.composer : {};
     const reply = authority && authority.reply ? authority.reply : {};
     const raw = authority && authority.raw ? authority.raw : {};
-    const closedLoopRunning = !!(
+    const runningOwnerAction = String(
       typeof window !== 'undefined'
       && window.__cgptToolboxRunningOwner
-      && String(
-        window.__cgptToolboxRunningOwner.taskKey
-        || window.__cgptToolboxRunningOwner.owner
-        || '',
-      ).trim()
-    );
+        ? (
+          window.__cgptToolboxRunningOwner.action
+          || window.__cgptToolboxRunningOwner.owner
+          || window.__cgptToolboxRunningOwner.taskKey
+          || ''
+        )
+        : '',
+    ).trim();
+    const closedLoopRunning = runningOwnerAction.startsWith('closed-loop');
+    const batchTaskGroupRunning = runningOwnerAction === 'batch-task-group';
+    const anyToolboxOwnerRunning = !!runningOwnerAction;
     let disabledReason = '';
     if (flags.pageOffline === true) {
       disabledReason = 'page_offline';
@@ -323,7 +328,12 @@
     }
     const sendPhase = String(reply.state || 'unknown');
     let buttonColorRole = 'normal';
-    if (closedLoopRunning || flags.pendingSend === true || sendPhase === 'waiting_send') {
+    if (
+      closedLoopRunning
+      || batchTaskGroupRunning
+      || flags.pendingSend === true
+      || sendPhase === 'waiting_send'
+    ) {
       buttonColorRole = 'running';
     }
     if (disabledReason) {
@@ -338,7 +348,7 @@
       assistantBusy: flags.replyBusy === true,
       canSendByHeader: flags.canSend === true,
       replyBusy: flags.replyBusy === true,
-      taskBusy: flags.taskBusy === true,
+      taskBusy: flags.taskBusy === true || batchTaskGroupRunning,
       attachmentBusy: composer.composerUploading === true,
       closedLoopRunning,
       pendingSend: flags.pendingSend === true,
@@ -407,15 +417,20 @@
       || bridgeState.pending_send === true
       || bridgeState.pendingSend === true
     );
-    const closedLoopRunning = !!(
+    const runningOwnerAction = String(
       typeof window !== 'undefined'
       && window.__cgptToolboxRunningOwner
-      && String(
-        window.__cgptToolboxRunningOwner.taskKey
-        || window.__cgptToolboxRunningOwner.owner
-        || '',
-      ).trim()
-    );
+        ? (
+          window.__cgptToolboxRunningOwner.action
+          || window.__cgptToolboxRunningOwner.owner
+          || window.__cgptToolboxRunningOwner.taskKey
+          || ''
+        )
+        : '',
+    ).trim();
+    const closedLoopRunning = runningOwnerAction.startsWith('closed-loop');
+    const batchTaskGroupRunning = runningOwnerAction === 'batch-task-group';
+    const anyToolboxOwnerRunning = !!runningOwnerAction;
     let disabledReason = '';
     if (bridgeState.page_offline === true || bridgeState.pageOffline === true) {
       disabledReason = 'page_offline';
@@ -424,7 +439,12 @@
     }
     const sendPhase = pendingSend ? 'waiting_send' : (assistantBusy ? 'answering' : 'unknown');
     let buttonColorRole = 'normal';
-    if (closedLoopRunning || pendingSend || sendPhase === 'waiting_send') {
+    if (
+      closedLoopRunning
+      || batchTaskGroupRunning
+      || pendingSend
+      || sendPhase === 'waiting_send'
+    ) {
       buttonColorRole = 'running';
     }
     if (disabledReason) {
@@ -440,7 +460,7 @@
       assistantBusy,
       canSendByHeader: inputable && sendable && !assistantBusy,
       replyBusy: assistantBusy,
-      taskBusy: false,
+      taskBusy: batchTaskGroupRunning,
       attachmentBusy: bridgeState.uploading === true || bridgeState.attachment_uploading === true,
       closedLoopRunning,
       pendingSend,
@@ -462,6 +482,9 @@
     const taskBusy = normalizeBooleanForButtonState(snapshot.taskBusy || snapshot.task_busy || snapshot.isTaskBusy);
     const attachmentBusy = normalizeBooleanForButtonState(snapshot.attachmentBusy || snapshot.attachment_busy || snapshot.uploading);
     const closedLoopRunning = normalizeBooleanForButtonState(snapshot.closedLoopRunning || snapshot.closed_loop_running);
+    const batchTaskGroupRunning = normalizeBooleanForButtonState(
+      snapshot.batchTaskGroupRunning || snapshot.batch_task_group_running,
+    );
     const pendingSend = normalizeBooleanForButtonState(snapshot.pendingSend || snapshot.pending_send);
     const realSendReady = normalizeBooleanForButtonState(snapshot.realSendReady || snapshot.real_send_ready);
     const sendable = normalizeBooleanForButtonState(snapshot.sendable);
@@ -469,7 +492,12 @@
     const sendPhase = String(snapshot.sendPhase || snapshot.send_phase || 'unknown');
     const disabledReason = String(snapshot.disabledReason || snapshot.disabled_reason || '');
     let buttonColorRole = snapshot.buttonColorRole || snapshot.button_color_role || 'normal';
-    if (closedLoopRunning || pendingSend || sendPhase === 'waiting_send') {
+    if (
+      closedLoopRunning
+      || batchTaskGroupRunning
+      || pendingSend
+      || sendPhase === 'waiting_send'
+    ) {
       buttonColorRole = 'running';
     }
     if (disabledReason) {
@@ -480,6 +508,7 @@
       taskBusy,
       attachmentBusy,
       closedLoopRunning,
+      batchTaskGroupRunning,
       pendingSend,
       realSendReady,
       sendable,

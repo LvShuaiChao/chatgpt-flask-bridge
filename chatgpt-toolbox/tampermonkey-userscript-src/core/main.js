@@ -10313,7 +10313,7 @@
         };
       }
       return {
-        text: '等回复',
+        text: '等待回复',
         cls: 'cgpt-state-waiting',
         type: 'waiting',
         title: '已发送，等待 ChatGPT 回复',
