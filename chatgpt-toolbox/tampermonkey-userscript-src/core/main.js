@@ -117,47 +117,27 @@
     let copyPipelineFallbackWarnedOnce = false;
 
     function stripChatGptInstrumentsLabel(text) {
-      try {
-        const normalizer = (
-          typeof window !== 'undefined' && window.TextNormalizer
-        ) ? window.TextNormalizer : (
-          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
-        );
-        if (normalizer && typeof normalizer.stripLabel === 'function') {
-          return normalizer.stripLabel(text);
-        }
-        console.error('[CORE_MAIN][TEXT_NORMALIZER_MISSING]', {
-          fn: 'stripLabel',
-        });
-        return String(text == null ? '' : text);
-      } catch (e) {
-        console.error('[CORE_MAIN][STRIP_INSTRUMENTS_LABEL_FAILED]', {
-          error: e && e.stack ? e.stack : String(e),
-        });
-        return String(text == null ? '' : text);
+      const normalizer = (
+        typeof window !== 'undefined'
+        && (window.ToolboxTextNormalizer || window.TextNormalizer)
+      ) || (typeof TextNormalizer !== 'undefined' ? TextNormalizer : null);
+      if (normalizer && typeof normalizer.stripLabel === 'function') {
+        return normalizer.stripLabel(text);
       }
+      console.error('[TEXT_NORMALIZER][MISSING] fn=stripLabel');
+      return String(text == null ? '' : text);
     }
 
     function collapseInstrumentsCalculatorReply(text) {
-      try {
-        const normalizer = (
-          typeof window !== 'undefined' && window.TextNormalizer
-        ) ? window.TextNormalizer : (
-          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
-        );
-        if (normalizer && typeof normalizer.collapseInstrumentsCalculatorReply === 'function') {
-          return normalizer.collapseInstrumentsCalculatorReply(text);
-        }
-        console.error('[CORE_MAIN][TEXT_NORMALIZER_MISSING]', {
-          fn: 'collapseInstrumentsCalculatorReply',
-        });
-        return String(text == null ? '' : text);
-      } catch (e) {
-        console.error('[CORE_MAIN][COLLAPSE_CALCULATOR_REPLY_FAILED]', {
-          error: e && e.stack ? e.stack : String(e),
-        });
-        return String(text == null ? '' : text);
+      const normalizer = (
+        typeof window !== 'undefined'
+        && (window.ToolboxTextNormalizer || window.TextNormalizer)
+      ) || (typeof TextNormalizer !== 'undefined' ? TextNormalizer : null);
+      if (normalizer && typeof normalizer.collapseInstrumentsCalculatorReply === 'function') {
+        return normalizer.collapseInstrumentsCalculatorReply(text);
       }
+      console.error('[TEXT_NORMALIZER][MISSING] fn=collapseInstrumentsCalculatorReply');
+      return String(text == null ? '' : text);
     }
 
     function cleanMessageText(text) {
@@ -3892,10 +3872,10 @@
     }
 
 
-    const COMPOSER_ATTACHMENT_FILE_EXT_RE = /\.(zip|txt|py|js|json|md|pdf|doc|docx|xlsx|csv|png|jpg|jpeg|webp|gif)\b/i;
-    const COMPOSER_ATTACHMENT_FILE_SIZE_RE = /\b\d+(?:\.\d+)?\s*(KB|MB|GB)\b/i;
-    const COMPOSER_ATTACHMENT_REMOVE_RE = /remove file|remove attachment|移除文件|删除文件|移除附件|删除附件/i;
-    const COMPOSER_ATTACHMENT_CHIP_RE = /file-chip|file-preview|composer-file|attachment-chip|attachment-preview/i;
+    const COMPOSER_ATTACHMENT_FILE_EXT_RE = /\.(zip|txt|py|js|ts|tsx|jsx|json|jsonl|md|pdf|doc|docx|xlsx|xls|csv|png|jpg|jpeg|webp|gif)\b/i;
+    const COMPOSER_ATTACHMENT_FILE_SIZE_RE = /\b\d+(?:\.\d+)?\s*(B|KB|MB|GB)\b/i;
+    const COMPOSER_ATTACHMENT_REMOVE_RE = /remove file|remove attachment|移除文件|删除文件|移除附件|删除附件|remove|删除|移除/i;
+    const COMPOSER_ATTACHMENT_CHIP_RE = /file-chip|file-preview|composer-file|attachment-chip|attachment-preview|压缩归档|uploaded|attachment/i;
     const COMPOSER_UPLOAD_ENTRY_RE = /添加文件|选择文件|上传文件|附加文件|add file|browse files|attach file|upload file|composer-plus-btn|file-input|plus button/i;
 
     function probeComposerAttachmentEvidence(raw) {
@@ -3954,41 +3934,123 @@
         && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
         && UploadCriticalRuntime.isUploadCriticalMode()
       );
-      const allowFallbackScan = options.allowFallbackScan === true && !critical;
+      const allowFallbackScan = !critical && (options.allowFallbackScan !== false);
       const roots = collectComposerAttachmentRoots();
       const chipSelectors = [
         '[data-testid*="attachment"]',
         '[data-testid*="file-chip"]',
         '[data-testid*="composer-file"]',
         '[data-testid*="file-preview"]',
+        '[data-testid*="file"]',
+        '[data-testid*="upload"]',
         '[class*="attachment-chip"]',
         '[class*="file-chip"]',
+        '[class*="attachment"]',
+        '[class*="file"]',
+        '[aria-label*="附件"]',
+        '[aria-label*="文件"]',
+        '[aria-label*="Remove"]',
+        '[aria-label*="remove"]',
+        '[aria-label*="删除"]',
+        '[aria-label*="移除"]',
+        '[title*=".zip"]',
+        '[title*=".txt"]',
+        '[title*=".pdf"]',
+        '[title*=".doc"]',
+        '[title*=".docx"]',
+        '[title*=".json"]',
+        '[title*=".py"]',
+        '[title*=".js"]',
+        '[title*=".ts"]',
+        '[aria-label*=".zip"]',
+        '[aria-label*=".txt"]',
+        '[aria-label*=".pdf"]',
+        '[aria-label*=".doc"]',
+        '[aria-label*=".docx"]',
+        '[aria-label*=".json"]',
+        '[aria-label*=".py"]',
+        '[aria-label*=".js"]',
+        '[aria-label*=".ts"]',
       ];
 
       const seen = new Set();
       const cards = [];
 
+      function addAttachmentCandidate(el) {
+        if (!(el instanceof HTMLElement)) return;
+        if (isInToolbox(el)) return;
+        if (!isElementVisible(el)) return;
+        if (isInsideConversationHistory(el)) return;
+        if (!isComposerAttachmentChipElement(el)) return;
+        if (seen.has(el)) return;
+        seen.add(el);
+        cards.push(el);
+      }
+
+      function looksLikeAttachmentCardText(merged) {
+        return (
+          COMPOSER_ATTACHMENT_FILE_EXT_RE.test(merged)
+          || COMPOSER_ATTACHMENT_FILE_SIZE_RE.test(merged)
+          || /压缩归档|文件|附件|uploaded|attachment/i.test(merged)
+        );
+      }
+
       roots.forEach((root) => {
         chipSelectors.forEach((sel) => {
           qsa(sel, root).forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            if (!isComposerAttachmentChipElement(el)) return;
-            if (seen.has(el)) return;
-            seen.add(el);
-            cards.push(el);
+            addAttachmentCandidate(el);
+            const card = el.closest('[role="listitem"], [data-testid], li, div');
+            if (card instanceof HTMLElement && card !== el) {
+              addAttachmentCandidate(card);
+            }
           });
         });
       });
 
       if (!cards.length && allowFallbackScan) {
         forEachLikelyAttachmentElement((el) => {
-          if (!(el instanceof HTMLElement)) return;
-          if (!isComposerAttachmentChipElement(el)) return;
-          if (seen.has(el)) return;
-          seen.add(el);
-          cards.push(el);
+          addAttachmentCandidate(el);
         });
       }
+
+      if (!cards.length && allowFallbackScan) {
+        roots.forEach((root) => {
+          qsa('div, span, li, button', root).forEach((node) => {
+            if (!(node instanceof HTMLElement)) return;
+            const text = String(node.innerText || node.textContent || '').trim();
+            if (!text) return;
+            const hasFileName = COMPOSER_ATTACHMENT_FILE_EXT_RE.test(text);
+            const hasSize = COMPOSER_ATTACHMENT_FILE_SIZE_RE.test(text);
+            if (!hasFileName || !hasSize) return;
+            const card = node.closest('[role="listitem"], li, div') || node;
+            addAttachmentCandidate(card);
+          });
+        });
+      }
+
+      if (!cards.length && allowFallbackScan) {
+        const composerRoot = roots[0] || getComposerRoot();
+        if (composerRoot instanceof HTMLElement) {
+          qsa('div, span, li, button', composerRoot).forEach((node) => {
+            if (!(node instanceof HTMLElement)) return;
+            const merged = [
+              node.innerText || '',
+              node.textContent || '',
+              node.getAttribute('aria-label') || '',
+              node.getAttribute('title') || '',
+            ].join(' ').trim();
+            if (!looksLikeAttachmentCardText(merged)) return;
+            const card = node.closest('[role="listitem"], li, div') || node;
+            addAttachmentCandidate(card);
+          });
+        }
+      }
+
+      const rootTag = roots[0] && roots[0].tagName ? roots[0].tagName : 'none';
+      appendComposerPollLogThrottled(
+        'attachment-scan-result',
+        `[COMPOSER][ATTACHMENT_SCAN_RESULT] count=${cards.length} rootTag=${rootTag}`,
+      );
 
       return cards;
     }

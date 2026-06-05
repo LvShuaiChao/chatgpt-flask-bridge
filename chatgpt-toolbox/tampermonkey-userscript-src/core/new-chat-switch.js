@@ -113,6 +113,39 @@ function clickElementLikeUserUnified(el, reason) {
     throw new Error('new_chat_click_target_not_html_element');
   }
 
+  const anchor = el instanceof HTMLAnchorElement
+    ? el
+    : (
+      typeof el.closest === 'function'
+        ? el.closest('a')
+        : null
+    );
+
+  if (anchor instanceof HTMLAnchorElement) {
+    try {
+      anchor.setAttribute('target', '_self');
+      anchor.removeAttribute('rel');
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[NEW_CHAT][FORCE_SAME_TAB] reason=${reasonText} href=${anchor.getAttribute('href') || '-'} target=_self`,
+        );
+      }
+    } catch (error) {
+      const errText = error && error.message ? error.message : String(error);
+      console.error('[NEW_CHAT][FORCE_SAME_TAB_FAILED]', {
+        reason: reasonText,
+        error_type: error && error.name,
+        error: errText,
+        stack: error && error.stack,
+      });
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[NEW_CHAT][FORCE_SAME_TAB_FAILED] reason=${reasonText} error=${errText}`,
+        );
+      }
+    }
+  }
+
   const rect = el.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
     throw new Error('new_chat_click_target_not_visible');

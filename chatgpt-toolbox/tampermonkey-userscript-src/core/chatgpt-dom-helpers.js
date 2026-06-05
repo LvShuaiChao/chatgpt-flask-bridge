@@ -180,6 +180,80 @@ const SEND_BUTTON_SELECT_LOG_MS = 2000;
 let sendButtonNotFoundLoggedAt = 0;
 let sendButtonNotFoundLoggedReason = '';
 const SEND_BUTTON_NOT_FOUND_LOG_MS = 2000;
+const SEND_BUTTON_NOT_FOUND_EMPTY_COMPOSER_LOG_MS = 15000;
+
+function readComposerTextLengthForSendButtonMissing() {
+  const candidates = [
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+    '#prompt-textarea',
+    '[data-testid="prompt-textarea"]',
+  ];
+  for (const selector of candidates) {
+    const node = document.querySelector(selector);
+    if (!node) {
+      continue;
+    }
+    const text = String(
+      node.value != null
+        ? node.value
+        : node.innerText != null
+          ? node.innerText
+          : node.textContent || '',
+    ).trim();
+    if (text.length > 0) {
+      return text.length;
+    }
+  }
+  return 0;
+}
+
+function readComposerAttachmentCountForSendButtonMissing(reason) {
+  if (typeof getComposerAttachmentState !== 'function') {
+    return 0;
+  }
+  try {
+    const attachmentState = getComposerAttachmentState({
+      reason: `send-button-missing:${reason || '-'}`,
+      heavy: false,
+    });
+    return Number(
+      attachmentState && (
+        attachmentState.composer
+        ?? attachmentState.count
+        ?? attachmentState.composerCount
+        ?? attachmentState.uniqueCount
+        ?? attachmentState.attachmentCount
+        ?? 0
+      ),
+    ) || 0;
+  } catch (error) {
+    const errText = error && error.message ? error.message : String(error);
+    console.error('[ChatGPT toolbox] readComposerAttachmentCountForSendButtonMissing failed', error);
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[COMPOSER][ATTACHMENT_COUNT_READ_FAILED] reason=${reason || '-'} error=${errText}`,
+      );
+    }
+    return 0;
+  }
+}
+
+function isExpectedMissingSendButtonBecauseEmptyComposer(reason) {
+  const normalizedReason = String(reason || '-').trim();
+  const isPollingProbe = normalizedReason === 'findSendButton:silent'
+    || normalizedReason === 'snapshot:-'
+    || normalizedReason.startsWith('snapshot:')
+    || normalizedReason === 'findChatGPTSendButton'
+    || normalizedReason === 'buildUploadOnlyButtonSnapshot';
+  if (!isPollingProbe) {
+    return false;
+  }
+  const textLen = readComposerTextLengthForSendButtonMissing();
+  const attachmentCount = readComposerAttachmentCountForSendButtonMissing(normalizedReason);
+  return textLen <= 0 && attachmentCount <= 0;
+}
 
 const COMPOSER_SEND_READY_SLEEP_MS_DEFAULT = 300;
 
@@ -192,6 +266,25 @@ function composeSendReadySleep(ms) {
 
 function shouldLogSendButtonNotFound(reason) {
   const normalizedReason = String(reason || '-').trim() || '-';
+
+  if (isExpectedMissingSendButtonBecauseEmptyComposer(normalizedReason)) {
+    const nowForEmptyComposer = Date.now();
+    if (
+      normalizedReason === sendButtonNotFoundLoggedReason
+      && nowForEmptyComposer - sendButtonNotFoundLoggedAt < SEND_BUTTON_NOT_FOUND_EMPTY_COMPOSER_LOG_MS
+    ) {
+      return false;
+    }
+    sendButtonNotFoundLoggedReason = normalizedReason;
+    sendButtonNotFoundLoggedAt = nowForEmptyComposer;
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(
+        `[COMPOSER][REAL_SEND_BUTTON_NOT_EXPECTED] reason=${normalizedReason} composerEmpty=1`,
+      );
+    }
+    return false;
+  }
+
   const now = Date.now();
 
   // High-frequency polling paths should be heavily throttled.

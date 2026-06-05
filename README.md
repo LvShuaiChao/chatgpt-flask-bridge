@@ -68,7 +68,7 @@ pip install -r requirements.txt
 3. **安装油猴脚本**  
    - 在 Tampermonkey 中安装 **`chatgpt-toolbox/dist/client.user.js`**（构建产物；不要直接改 `dist/`，且已加入 `.gitignore`）  
    - 开发时改 `chatgpt-toolbox/tampermonkey-userscript-src/`，在 `chatgpt-toolbox/` 下执行 `npm run build` 后重新安装/更新脚本  
-   - 根目录 `client.user.js` 由 `npm run build` 同步生成，同样不纳入 Git；本地测试可直接引用该文件或 `dist/` 下的副本  
+   - 根目录 `client.user.js` 由 `npm run build` 同步生成，**纳入 Git 提交**（便于按提交恢复 Tampermonkey 单文件）；`chatgpt-toolbox/dist/` 仍在 `.gitignore` 中  
    - 桥接服务固定监听 `127.0.0.1:5000`；若曾改过端口，在油猴菜单 **「浏览器桥接 · 设置」** 中填写地址（无需改脚本源码）
 
 4. **打开 ChatGPT**  

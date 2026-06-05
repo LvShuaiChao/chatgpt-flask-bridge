@@ -5908,15 +5908,7 @@ const AutoQueueModule = (() => {
         return true;
       }
       if (authorityAnswering === false) {
-        const bridgeBusy = Boolean(
-          typeof BridgeState !== 'undefined'
-          && BridgeState
-          && (
-            BridgeState.response_state === 'generating'
-            || BridgeState.response_state === 'streaming'
-          )
-        );
-        return bridgeBusy;
+        return false;
       }
       const stopButton = typeof hasRealChatGPTStopGeneratingButton === 'function'
         && hasRealChatGPTStopGeneratingButton();
@@ -9692,54 +9684,76 @@ const AutoQueueModule = (() => {
       autoqBusyCheckDepth += 1;
       try {
         const toolboxAuthority = getToolboxUnifiedAuthorityForAutoQueue(source);
-        const authorityReplyReady = toolboxAuthority
-          && toolboxAuthority.reply.state === 'ready'
-          && !toolboxAuthority.composer.hasRealStopButton;
-        const authorityReplyAnswering = toolboxAuthority
-          && (
-            toolboxAuthority.reply.state === 'answering'
-            || toolboxAuthority.reply.busy === true
+
+        if (toolboxAuthority && toolboxAuthority.flags) {
+          const authorityFlags = toolboxAuthority.flags;
+          const authorityReplyState = toolboxAuthority.reply
+            ? String(toolboxAuthority.reply.state || '-')
+            : '-';
+          const authorityReplyReady = authorityReplyState === 'ready'
+            && toolboxAuthority.composer.hasRealStopButton !== true;
+          const authorityReplyBusy = !!(
+            authorityFlags.replyBusy === true
+            || authorityReplyState === 'answering'
             || toolboxAuthority.composer.hasRealStopButton === true
           );
+          const authorityTaskBusy = authorityFlags.taskBusy === true;
 
-        if (toolboxAuthority && authorityReplyReady) {
-          appendAutoQueuePollLogThrottled(
-            'busy-check-authority-ready',
-            '[AUTOQ][BUSY_CHECK_AUTHORITY_READY] '
-            + `source=${source} action=not-busy replyState=${toolboxAuthority.reply.state} `
-            + `taskState=${toolboxAuthority.task.state} stop=${toolboxAuthority.composer.hasRealStopButton ? 1 : 0}`,
-          );
-          return false;
-        }
-        if (toolboxAuthority && authorityReplyAnswering) {
-          appendAutoQueuePollLogThrottled(
-            'busy-check-authority-answering',
-            '[AUTOQ][BUSY_CHECK_AUTHORITY_ANSWERING] '
-            + `source=${source} action=busy replyState=${toolboxAuthority.reply.state} `
-            + `stop=${toolboxAuthority.composer.hasRealStopButton ? 1 : 0}`,
-          );
-          return true;
-        }
+          if (authorityReplyReady && !authorityTaskBusy) {
+            appendAutoQueuePollLogThrottled(
+              'busy-check-authority-ready',
+              '[AUTOQ][BUSY_CHECK_AUTHORITY_READY] '
+              + `source=${source} action=not-busy replyState=${authorityReplyState} `
+              + `taskState=${toolboxAuthority.task.state} stop=${toolboxAuthority.composer.hasRealStopButton ? 1 : 0}`,
+            );
+            return false;
+          }
+          if (authorityReplyBusy) {
+            appendAutoQueuePollLogThrottled(
+              'busy-check-authority-answering',
+              '[AUTOQ][BUSY_CHECK_AUTHORITY_ANSWERING] '
+              + `source=${source} action=busy replyState=${authorityReplyState} `
+              + `stop=${toolboxAuthority.composer.hasRealStopButton ? 1 : 0}`,
+            );
+            return true;
+          }
 
-        const assistantBusy = authorityReplyAnswering
-          ? true
-          : (authorityReplyReady
+          const composerSendButtonWait = (
+            state.waitingReply
+            || skipComposerSendButtonWait
+          )
             ? false
-            : (
-              typeof ComposerApi !== 'undefined'
-              && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-              && ComposerApi.isAssistantLikelyBusy()
-            ));
+            : isComposerSendButtonWaitBlocking({
+              source: `busy-check:${source}`,
+            });
+          const busy = Boolean(authorityTaskBusy || composerSendButtonWait);
 
-        const hasStopButton = authorityReplyReady
-          ? false
-          : (
-            authorityReplyAnswering
-            || (
-              typeof hasRealChatGPTStopGeneratingButton === 'function'
-              && hasRealChatGPTStopGeneratingButton()
-            )
+          appendAutoQueuePollLogThrottled(
+            'busy-check',
+            '[AUTOQ][BUSY_CHECK_AUTHORITY_ONLY] '
+            + `source=${source} `
+            + `replyState=${authorityReplyState} `
+            + `replyBusy=${authorityReplyBusy ? 1 : 0} `
+            + `taskBusy=${authorityTaskBusy ? 1 : 0} `
+            + `composerSendButtonWait=${composerSendButtonWait ? 1 : 0} `
+            + `busy=${busy ? 1 : 0}`,
           );
+          return busy;
+        }
+
+        const authorityReplyReady = false;
+        const authorityReplyAnswering = false;
+
+        const assistantBusy = (
+          typeof ComposerApi !== 'undefined'
+          && typeof ComposerApi.isAssistantLikelyBusy === 'function'
+          && ComposerApi.isAssistantLikelyBusy()
+        );
+
+        const hasStopButton = (
+          typeof hasRealChatGPTStopGeneratingButton === 'function'
+          && hasRealChatGPTStopGeneratingButton()
+        );
 
         let bridgeGenerating = false;
         let bridgeAssistantBusy = false;
@@ -9747,28 +9761,16 @@ const AutoQueueModule = (() => {
         let responseStateText = '-';
         let responseReasonText = '-';
 
-        if (toolboxAuthority) {
-          responseStateText = String(toolboxAuthority.raw.responseState || '-');
-          responseReasonText = String(toolboxAuthority.raw.responseReason || '-');
-        }
-        if (!toolboxAuthority && !authorityReplyReady && typeof BridgeState !== 'undefined' && BridgeState) {
-          if (!toolboxAuthority) {
-            responseStateText = String(BridgeState.response_state || '-');
-            responseReasonText = String(BridgeState.response_state_reason || '-');
-          }
+        if (typeof BridgeState !== 'undefined' && BridgeState) {
+          responseStateText = String(BridgeState.response_state || '-');
+          responseReasonText = String(BridgeState.response_state_reason || '-');
           bridgeGenerating = BridgeState.response_state === 'generating'
             || BridgeState.response_state === 'streaming';
           bridgeAssistantBusy = BridgeState.response_state_reason === 'assistant_busy';
         }
-        if (authorityReplyReady || authorityReplyAnswering) {
-          bridgeGenerating = false;
-          bridgeAssistantBusy = false;
-        }
 
         if (
-          !toolboxAuthority
-          && !authorityReplyReady
-          && !skipDetectComposerState
+          !skipDetectComposerState
           && typeof detectComposerResponseState === 'function'
         ) {
           try {
@@ -9789,9 +9791,6 @@ const AutoQueueModule = (() => {
           } catch (error) {
             appendAutoqStackErrorLog('[AUTOQ][BUSY_CHECK][detectComposerResponseState]', error, `source=${source}`);
           }
-        }
-        if (authorityReplyReady) {
-          detectBusy = false;
         }
 
         const composerSendButtonWait = (
@@ -9874,15 +9873,14 @@ const AutoQueueModule = (() => {
 
         appendAutoQueuePollLogThrottled(
           'busy-check',
-          `[AUTOQ][BUSY_CHECK] assistantBusy=${assistantBusy ? 1 : 0} `
+          `[AUTOQ][BUSY_CHECK_FALLBACK] assistantBusy=${assistantBusy ? 1 : 0} `
           + `stopButton=${hasStopButton ? 1 : 0} `
           + `bridgeGenerating=${bridgeGenerating ? 1 : 0} `
           + `bridgeAssistantBusy=${bridgeAssistantBusy ? 1 : 0} `
           + `detectBusy=${detectBusy ? 1 : 0} `
           + `composerSendButtonWait=${composerSendButtonWait ? 1 : 0} `
           + `skipComposerSendButtonWait=${skipComposerSendButtonWait ? 1 : 0} `
-          + `authorityUsed=${toolboxAuthority ? 1 : 0} `
-          + `authorityReplyState=${toolboxAuthority ? toolboxAuthority.reply.state || '-' : '-'} `
+          + `authorityUsed=0 `
           + `authorityReplyReady=${authorityReplyReady ? 1 : 0} `
           + `response_state=${responseStateText} reason=${responseReasonText} source=${source}`,
         );

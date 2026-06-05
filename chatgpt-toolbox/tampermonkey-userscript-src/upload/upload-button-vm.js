@@ -25,7 +25,17 @@
     const unified = snap.toolboxUnifiedAuthority;
     if (unified && typeof unified === 'object' && unified.reply) {
       const flags = unified.flags && typeof unified.flags === 'object' ? unified.flags : {};
+      const usage = unified.usage && typeof unified.usage === 'object' ? unified.usage : {};
       const replyBusy = flags.replyBusy === true;
+      const uploadQuotaExceeded = !!(
+        flags.uploadQuotaExceeded === true
+        || usage.uploadQuotaExceeded === true
+      );
+      const uploadQuotaRemaining = Number.isFinite(Number(flags.uploadQuotaRemaining))
+        ? Number(flags.uploadQuotaRemaining)
+        : Number.isFinite(Number(usage.uploadQuotaRemaining))
+          ? Number(usage.uploadQuotaRemaining)
+          : -1;
       return {
         isToolboxStatusAuthoritySnapshot: true,
         replyText: unified.reply.text || '',
@@ -37,8 +47,28 @@
         shouldWaitReplyByTopStatus: replyBusy,
         canSendByTopStatus: flags.canSend === true,
         canStartUploadByTopStatus: flags.canUpload === true,
+        uploadQuotaExceeded,
+        uploadQuotaRemaining,
+        canUploadByHeader: flags.canUpload === true,
         responseState: unified.raw && unified.raw.responseState ? unified.raw.responseState : '',
         responseReason: unified.raw && unified.raw.responseReason ? unified.raw.responseReason : '',
+        topReplyStatus: snap.topReplyStatus || {},
+      };
+    }
+    if (
+      snap.uploadQuotaExceeded !== undefined
+      || snap.canUploadByHeader !== undefined
+      || snap.uploadQuotaRemaining !== undefined
+    ) {
+      return {
+        isToolboxStatusAuthoritySnapshot: true,
+        uploadQuotaExceeded: snap.uploadQuotaExceeded === true,
+        uploadQuotaRemaining: Number.isFinite(Number(snap.uploadQuotaRemaining))
+          ? Number(snap.uploadQuotaRemaining)
+          : -1,
+        canUploadByHeader: snap.canUploadByHeader === true,
+        replyBusy: snap.replyBusy === true,
+        canStartUploadByTopStatus: snap.canUploadByHeader === true,
         topReplyStatus: snap.topReplyStatus || {},
       };
     }
@@ -114,6 +144,7 @@
     const ready = !!(
       status.ready
       || text === '待发送'
+      || text === '可发送'
       || text === '可输入'
       || text === '就绪'
     );
@@ -1647,6 +1678,48 @@
     };
   }
 
+  function isClosedLoopWaitingCountdownText(text) {
+    const s = String(text || '').trim();
+    return /（等待\s*\d+\s*s?）|（等待\s*\d+\s*秒）|\(等待\s*\d+\s*s?\)/.test(s);
+  }
+
+  function isClosedLoopRetryCountdownText(text) {
+    const s = String(text || '').trim();
+    return /（重试\s*\d+\s*s?）|（重试\s*\d+\s*秒）|\(重试\s*\d+\s*s?\)/.test(s);
+  }
+
+  function shouldClosedLoopOwnerUseDangerStopView(action, text, runtimeState = {}) {
+    const normalizedAction = String(action || '').trim();
+    if (!isClosedLoopButtonAction(normalizedAction)) {
+      return true;
+    }
+    const label = String(text || '').trim();
+    const ownerPhase = String(
+      runtimeState.phase
+      || runtimeState.buttonPhase
+      || runtimeState.taskPhase
+      || '',
+    ).trim().toLowerCase();
+    const isWaitingCountdown = isClosedLoopWaitingCountdownText(label);
+    const isRetryCountdown = isClosedLoopRetryCountdownText(label);
+    if (isWaitingCountdown) {
+      return false;
+    }
+    if (
+      ownerPhase === 'waiting'
+      || ownerPhase === 'delay'
+      || ownerPhase === 'post_reply_delay'
+      || ownerPhase === 'post-reply-delay'
+      || ownerPhase === 'scheduled'
+    ) {
+      return false;
+    }
+    if (isRetryCountdown) {
+      return true;
+    }
+    return true;
+  }
+
   function resolveUnifiedButtonVisualState(buttonConfig = {}, runtimeState = {}) {
     const startedAt = Date.now();
     const kind = String(
@@ -1743,6 +1816,7 @@
     }
 
     const shouldBeRedStop = isStopAction
+      && shouldClosedLoopOwnerUseDangerStopView(action, text, runtimeState)
       && (!isClosedLoopStopLikeText(text) || shouldShowClosedLoopStopView(action, { id, action }, runtimeState))
       && (!isClosedLoopButton || isClosedLoopOwner)
       && (
@@ -1758,6 +1832,58 @@
           )
         )
       );
+
+    const shouldBeWaitingOwner = !!(
+      isStopAction
+      && isClosedLoopButton
+      && isClosedLoopOwner
+      && !shouldClosedLoopOwnerUseDangerStopView(action, text, runtimeState)
+    );
+
+    if (shouldBeWaitingOwner) {
+      const waitingOwnerView = {
+        kind,
+        enabled: true,
+        disabled: false,
+        running: true,
+        blocked: false,
+        colorRole: 'running',
+        visual: 'waiting',
+        disabledReason: '',
+        reason: 'closed-loop-owner-waiting-countdown',
+        sendPhase: snapshot.sendPhase || 'unknown',
+        replyBusy: snapshot.replyBusy === true,
+        taskBusy: snapshot.taskBusy === true,
+        attachmentBusy: snapshot.attachmentBusy === true,
+        closedLoopRunning: snapshot.closedLoopRunning === true,
+        pendingSend: snapshot.pendingSend === true,
+        realSendReady: snapshot.realSendReady === true,
+        sendable: snapshot.sendable === true,
+        inputable: snapshot.inputable === true,
+        label: text,
+        source: 'upload-button-vm:resolveUnifiedButtonVisualState',
+        authoritySource: snapshot.source || '',
+        ownerId,
+        ts: Date.now(),
+      };
+      console.log('[UPLOAD_BUTTON_VM][VISUAL_STATE_RESOLVED]', {
+        kind,
+        enabled: waitingOwnerView.enabled,
+        running: waitingOwnerView.running,
+        blocked: waitingOwnerView.blocked,
+        colorRole: waitingOwnerView.colorRole,
+        visual: waitingOwnerView.visual,
+        reason: waitingOwnerView.reason,
+        sendPhase: waitingOwnerView.sendPhase,
+        costMs: Date.now() - startedAt,
+      });
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[BUTTON_COLOR][WAITING_OWNER_NOT_DANGER] id=${id || '-'} action=${action || '-'} text=${text || '-'} reason=closed-loop-waiting-countdown`,
+        );
+      }
+      return waitingOwnerView;
+    }
 
     if (shouldBeRedStop) {
       const stopView = {
@@ -2300,6 +2426,25 @@
       return nextView;
     }
 
+    if (
+      unified.visual === 'waiting'
+      && unified.reason === 'closed-loop-owner-waiting-countdown'
+    ) {
+      if (view.disabled) {
+        logButtonColorFixStopDisabled(button, buttonConfig, true);
+      }
+      nextView = {
+        ...view,
+        disabled: false,
+        allowCancel: true,
+        buttonPhase: 'waiting',
+        forceDanger: false,
+        action: view.action === 'none' ? 'stop' : (view.action || 'stop'),
+        preserveBaseColorWhenDisabled: false,
+      };
+      return nextView;
+    }
+
     if (unified.reason === 'locked-by-closed-loop-running') {
       const lockedText = isClosedLoopModeButton(normalizedAction)
         ? getClosedLoopIdleTextByAction(normalizedAction, snapshot)
@@ -2433,6 +2578,14 @@
   }
 
   function normalizeButtonVmSendPhase(phase) {
+    if (
+      typeof ButtonTasks !== 'undefined'
+      && ButtonTasks
+      && typeof ButtonTasks.canonicalizeTaskPhaseInput === 'function'
+    ) {
+      return ButtonTasks.canonicalizeTaskPhaseInput(phase).phase;
+    }
+    console.error('[BUTTON_TASKS][MISSING] fn=canonicalizeTaskPhaseInput phase-only');
     const value = String(phase || '').trim().toLowerCase();
     if (
       value === 'idle'
@@ -2445,48 +2598,18 @@
     ) {
       return value;
     }
-    if (
-      value === 'waiting'
-      || value === 'waiting_input'
-      || value === 'waiting_attachment'
-      || value === 'waiting_page_reply_to_send'
-      || value === 'ready_to_click'
-      || value === 'waiting_composer'
-      || value === 'preparing'
-    ) {
-      return 'waiting_send';
-    }
-    if (
-      value === 'clicking_send'
-      || value === 'writing_text'
-      || value === 'sending_hotkey'
-      || value === 'sending_continue'
-      || value === 'confirming_clipboard'
-      || value === 'copying'
-      || value === 'running'
-    ) {
-      return 'sending';
-    }
-    if (
-      value === 'sent_waiting_response'
-      || value === 'waiting_reply'
-      || value === 'stopping_response'
-    ) {
-      return 'waiting_reply';
-    }
-    if (value === 'done' || value === 'completed') {
-      return 'success';
-    }
-    if (value === 'error' || value === 'fail') {
-      return 'failed';
-    }
-    if (value === 'cancel' || value === 'canceled') {
-      return 'cancelled';
-    }
     return 'idle';
   }
 
   function normalizeButtonVmSendSubPhase(phase, subPhase) {
+    if (
+      typeof ButtonTasks !== 'undefined'
+      && ButtonTasks
+      && typeof ButtonTasks.canonicalizeTaskPhaseInput === 'function'
+    ) {
+      return ButtonTasks.canonicalizeTaskPhaseInput(phase, subPhase).subPhase || '';
+    }
+    console.error('[BUTTON_TASKS][MISSING] fn=canonicalizeTaskPhaseInput phase+subPhase');
     const rawSubPhase = String(subPhase || '').trim();
     if (rawSubPhase) {
       return rawSubPhase;
@@ -3294,6 +3417,30 @@
       });
     }
 
+    const authorityForUploadButton = getToolboxAuthorityFromSnapshot(snapshot);
+    const uploadQuotaExceeded = !!(
+      authorityForUploadButton && authorityForUploadButton.uploadQuotaExceeded === true
+    );
+    if (uploadQuotaExceeded) {
+      console.warn('[UPLOAD_BUTTON][QUOTA_BLOCK]', {
+        reason: 'upload-quota-exceeded',
+        uploadQuotaExceeded: true,
+        uploadQuotaRemaining: authorityForUploadButton && authorityForUploadButton.uploadQuotaRemaining,
+        canUploadByHeader: authorityForUploadButton && authorityForUploadButton.canUploadByHeader,
+      });
+      return withUploadButtonTaskKey({
+        phase: 'quota_waiting',
+        text: '额度满',
+        title: '上传额度已达上限，等待额度释放或清空统计后再上传',
+        disabled: true,
+        allowCancel: false,
+        action: 'none',
+        buttonPhase: 'idle',
+        disabledReason: 'upload-quota-exceeded',
+        preserveBaseColorWhenDisabled: true,
+      });
+    }
+
     const authorityReplyBusy = isAuthorityReplyBusyForButtons(snapshot);
     const authorityReplyAnswering = isAuthorityReplyAnsweringForButtons(snapshot);
     const authorityReplyWaiting = isAuthorityReplyWaitingForButtons(snapshot);
@@ -3302,6 +3449,13 @@
       const uploadPhase = String(
         snapshot.uploadTask && snapshot.uploadTask.phase || '',
       ).trim().toLowerCase();
+      const uploadRunningForReplyGate = uploadPhase === 'uploading'
+        || uploadPhase === 'preparing'
+        || uploadPhase === 'verifying'
+        || uploadPhase === 'cancelling'
+        || snapshot.uploadRunning === true;
+      const uploadTaskRunningForReplyGate = uploadRunningForReplyGate
+        || (uploadPhase && uploadPhase !== 'idle' && uploadPhase !== 'success');
       const uploadTaskIdle = !uploadPhase || uploadPhase === 'idle' || uploadPhase === 'success';
       const statusText = String(topReplyStatus.text || '').trim()
         || (authorityReplyAnswering ? '回答中' : '等待回复');
@@ -3324,17 +3478,22 @@
           1500,
         );
       }
-      if (uploadTaskIdle) {
+      if (uploadTaskIdle && !uploadRunningForReplyGate && !uploadTaskRunningForReplyGate) {
+        console.warn('[UPLOAD_BUTTON][REPLY_BUSY_BLOCK]', {
+          reason: 'reply-busy',
+          replyText: authority && authority.replyText,
+          uploadPhase: uploadPhase || '-',
+        });
         return withUploadButtonTaskKey({
-          phase: TaskPhase.IDLE,
-          text: '开始上传',
-          title: '只上传/绑定文件到 ChatGPT 输入框，不自动发送',
-          disabled: false,
+          phase: 'waiting_reply',
+          text: '等回复后上传',
+          title: '当前 ChatGPT 正在回复，等待回复完成后再上传文件',
+          disabled: true,
           allowCancel: false,
-          action: 'start-upload',
+          action: 'none',
           buttonPhase: 'idle',
-          preserveBaseColorWhenDisabled: false,
-          disabledReason: '',
+          disabledReason: 'reply-busy',
+          preserveBaseColorWhenDisabled: true,
         });
       }
       return withUploadButtonTaskKey({
@@ -5463,6 +5622,41 @@
       disabled = false;
       reason = 'cancel-action-allowed';
     } else if (normalized === 'start-upload') {
+      const authorityForUploadAction = getToolboxAuthorityFromSnapshot(snapshot);
+      if (authorityForUploadAction && authorityForUploadAction.uploadQuotaExceeded === true) {
+        console.warn('[UPLOAD_ACTION][BLOCKED_BY_QUOTA]', {
+          action: normalized,
+          reason: 'upload-quota-exceeded',
+          uploadQuotaRemaining: authorityForUploadAction.uploadQuotaRemaining,
+          canUploadByHeader: authorityForUploadAction.canUploadByHeader,
+        });
+        return {
+          disabled: true,
+          reason: 'upload-quota-exceeded',
+          sendPhase,
+          sendHotkeyPhase,
+          copyPhase,
+          copyHotkeyPhase,
+          waitContinuePhase,
+          pageReplyStatus,
+        };
+      }
+      if (replyBusy) {
+        console.warn('[UPLOAD_ACTION][BLOCKED_BY_REPLY_BUSY]', {
+          action: normalized,
+          reason: 'reply-busy',
+        });
+        return {
+          disabled: true,
+          reason: 'reply-busy',
+          sendPhase,
+          sendHotkeyPhase,
+          copyPhase,
+          copyHotkeyPhase,
+          waitContinuePhase,
+          pageReplyStatus,
+        };
+      }
       disabled = false;
       reason = 'ok';
     } else if (normalized === 'send-message') {

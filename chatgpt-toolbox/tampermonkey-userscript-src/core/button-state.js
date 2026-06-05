@@ -29,6 +29,71 @@
     PAUSED: 'paused',
   });
 
+  const BUTTON_AUTHORITY_CACHE_MAX_AGE_MS = 600;
+  const BUTTON_VISUAL_OWNER_MAX_AGE_MS = 2500;
+
+  function getPositiveTimestamp(value) {
+    const n = Number(value || 0);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function isFreshToolboxAuthorityCache(cache, maxAgeMs = BUTTON_AUTHORITY_CACHE_MAX_AGE_MS) {
+    if (!cache || typeof cache !== 'object') {
+      return false;
+    }
+    if (!cache.flags || typeof cache.flags !== 'object') {
+      return false;
+    }
+    const builtAt = getPositiveTimestamp(cache.builtAt || cache.ts || cache.updatedAt);
+    if (!builtAt) {
+      return false;
+    }
+    return Date.now() - builtAt <= maxAgeMs;
+  }
+
+  function getWindowToolboxRunningOwner() {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    const owner = window.__cgptToolboxRunningOwner;
+    return owner && typeof owner === 'object' ? owner : null;
+  }
+
+  function isFreshToolboxRunningOwner(owner, maxAgeMs = BUTTON_VISUAL_OWNER_MAX_AGE_MS) {
+    if (!owner || typeof owner !== 'object') {
+      return false;
+    }
+    const action = String(owner.action || owner.owner || owner.taskKey || '').trim();
+    if (!action) {
+      return false;
+    }
+    const ts = getPositiveTimestamp(owner.updatedAt || owner.startedAt || owner.ts);
+    if (!ts) {
+      return false;
+    }
+    return Date.now() - ts <= maxAgeMs;
+  }
+
+  function clearStaleWindowToolboxRunningOwner(owner, reason = '') {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (!owner || typeof owner !== 'object') {
+      return;
+    }
+    if (window.__cgptToolboxRunningOwner !== owner) {
+      return;
+    }
+    console.warn('[TOOLBOX_BUTTON_STATE][STALE_RUNNING_OWNER_CLEARED]', {
+      reason,
+      owner: owner.action || owner.owner || owner.taskKey || '-',
+      phase: owner.phase || '-',
+      startedAt: owner.startedAt || 0,
+      updatedAt: owner.updatedAt || 0,
+    });
+    window.__cgptToolboxRunningOwner = null;
+  }
+
   const BUTTON_PHASE_ALLOW_CANCEL = new Set([
     ButtonPhase.WAITING,
     ButtonPhase.RUNNING,
@@ -303,24 +368,66 @@
 
   function mapToolboxAuthorityCacheToSnapshot(authority, source) {
     const flags = authority && authority.flags ? authority.flags : {};
+    const usage = authority && authority.usage ? authority.usage : {};
     const composer = authority && authority.composer ? authority.composer : {};
     const reply = authority && authority.reply ? authority.reply : {};
     const task = authority && authority.task ? authority.task : {};
     const raw = authority && authority.raw ? authority.raw : {};
-    const runningOwnerAction = String(
-      typeof window !== 'undefined'
-      && window.__cgptToolboxRunningOwner
+    const uploadQuotaExceeded = !!(
+      flags.uploadQuotaExceeded === true
+      || usage.uploadQuotaExceeded === true
+    );
+    const uploadQuotaRemaining = Number.isFinite(Number(flags.uploadQuotaRemaining))
+      ? Number(flags.uploadQuotaRemaining)
+      : Number.isFinite(Number(usage.uploadQuotaRemaining))
+        ? Number(usage.uploadQuotaRemaining)
+        : -1;
+    const authorityTaskState = String(
+      task.state
+      || task.taskState
+      || ''
+    ).trim().toLowerCase();
+    const authorityTaskBusy = !!(
+      flags.taskBusy === true
+      || task.busy === true
+    );
+    const rawWindowRunningOwner = getWindowToolboxRunningOwner();
+    const windowRunningOwnerFresh = isFreshToolboxRunningOwner(rawWindowRunningOwner);
+    if (rawWindowRunningOwner && !windowRunningOwnerFresh) {
+      clearStaleWindowToolboxRunningOwner(
+        rawWindowRunningOwner,
+        `mapToolboxAuthorityCacheToSnapshot:${source || '-'}`,
+      );
+    }
+    const windowRunningOwnerAction = String(
+      windowRunningOwnerFresh
         ? (
-          window.__cgptToolboxRunningOwner.action
-          || window.__cgptToolboxRunningOwner.owner
-          || window.__cgptToolboxRunningOwner.taskKey
+          rawWindowRunningOwner.action
+          || rawWindowRunningOwner.owner
+          || rawWindowRunningOwner.taskKey
           || ''
         )
         : '',
     ).trim();
-    const closedLoopRunning = runningOwnerAction.startsWith('closed-loop');
-    const batchTaskGroupRunning = runningOwnerAction === 'batch-task-group';
-    const anyToolboxOwnerRunning = !!runningOwnerAction;
+    const closedLoopRunning = !!(
+      authorityTaskState === 'closed_loop_running'
+      || task.closedLoopRunning === true
+    );
+    const batchTaskGroupRunning = !!(
+      authorityTaskState === 'batch_task_running'
+      || windowRunningOwnerAction === 'batch-task-group'
+    );
+    /*
+     * authority.task / flags.taskBusy 是业务运行权威来源。
+     * window.__cgptToolboxRunningOwner 只允许作为“刚点击后的短时视觉 owner”参与颜色判断，
+     * 且必须有时间戳并在 BUTTON_VISUAL_OWNER_MAX_AGE_MS 内。
+     */
+    const anyToolboxOwnerRunning = !!(
+      authorityTaskBusy
+      || closedLoopRunning
+      || batchTaskGroupRunning
+      || windowRunningOwnerAction
+    );
     let disabledReason = '';
     if (flags.pageOffline === true) {
       disabledReason = 'page_offline';
@@ -339,10 +446,6 @@
     const pendingSend = !!(
       flags.pendingSend === true
       || reply.pendingSend === true
-      || reply.state === 'waiting_send'
-      || sendPhase === 'waiting_send'
-      || sendPhase === 'waiting_ready'
-      || sendPhase === 'waiting_page_reply_to_send'
     );
     let buttonColorRole = 'normal';
     if (
@@ -368,11 +471,16 @@
       attachmentBusy: composer.composerUploading === true,
       closedLoopRunning,
       anyToolboxOwnerRunning,
+      runningOwnerAction: windowRunningOwnerAction,
+      runningOwnerFresh: windowRunningOwnerFresh === true,
       pendingSend,
-      realSendReady: composer.realSendButtonReady === true || composer.hasRealSendButton === true,
+      realSendReady: composer.realSendButtonReady === true,
       sendPhase,
       disabledReason,
       buttonColorRole,
+      canUploadByHeader: flags.canUpload === true,
+      uploadQuotaExceeded,
+      uploadQuotaRemaining,
     };
   }
 
@@ -478,8 +586,16 @@
         ? window.__cgptToolboxAuthorityCache
         : null;
 
-      if (cached) {
+      if (cached && isFreshToolboxAuthorityCache(cached)) {
         return mapToolboxAuthorityCacheToSnapshot(cached, sourceText);
+      }
+
+      if (cached) {
+        console.warn('[TOOLBOX_BUTTON_STATE][STALE_AUTHORITY_CACHE_IGNORED]', {
+          source: sourceText,
+          builtAt: cached.builtAt || 0,
+          ageMs: cached.builtAt ? Date.now() - Number(cached.builtAt || 0) : -1,
+        });
       }
 
       if (

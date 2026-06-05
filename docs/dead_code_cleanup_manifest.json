@@ -15,7 +15,7 @@
       "Python 入口为 GUI.py（不是 gui.py / server.py）。",
       "合并导出 zip（0_merged_for_chatgpt*.zip）解压后常为单文件 0_merged_for_chatgpt.txt；须按 FILE: 分隔符还原文件树后再审，勿把单个 txt 当目录结构。",
       "静态 import 不可达 ≠ 可删：保留 app/client/bridge_client.py 与各包 __init__.py（见 categories.must_keep）。",
-      "导出快照通常不含 __pycache__/、*.pyc、client.user.js、chatgpt-toolbox/dist/client.user.js；缺失正常。",
+      "导出快照通常不含 __pycache__/、*.pyc、client.user.js、chatgpt-toolbox/dist/client.user.js；缺失正常。根目录 client.user.js 由 Git 跟踪。",
       "client.user.js 与 chatgpt-toolbox/dist/client.user.js 为 npm run build 生成产物；不做 baseline sha256 强校验；禁止手工编辑。"
     ]
   },

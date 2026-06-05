@@ -5,54 +5,39 @@
 
   const CopyPipeline = (() => {
     function normalizeClipboardTextForCompare(text) {
-      if (typeof TextNormalizer !== 'undefined' && TextNormalizer && typeof TextNormalizer.normalizeClipboardTextForCompare === 'function') {
-        return TextNormalizer.normalizeClipboardTextForCompare(text);
+      const normalizer = (
+        typeof window !== 'undefined'
+        && (window.ToolboxTextNormalizer || window.TextNormalizer)
+      ) || (typeof TextNormalizer !== 'undefined' ? TextNormalizer : null);
+      if (normalizer && typeof normalizer.normalizeClipboardTextForCompare === 'function') {
+        return normalizer.normalizeClipboardTextForCompare(text);
       }
+      console.error('[TEXT_NORMALIZER][MISSING] fn=normalizeClipboardTextForCompare');
       return String(text || '').replace(/\r\n/g, '\n').trim();
     }
 
     function stripChatGptInstrumentsLabel(text) {
-      try {
-        const normalizer = (
-          typeof window !== 'undefined' && window.TextNormalizer
-        ) ? window.TextNormalizer : (
-          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
-        );
-        if (normalizer && typeof normalizer.stripLabel === 'function') {
-          return normalizer.stripLabel(text);
-        }
-        console.error('[COPY_PIPELINE][TEXT_NORMALIZER_MISSING]', {
-          fn: 'stripLabel',
-        });
-        return String(text == null ? '' : text);
-      } catch (e) {
-        console.error('[COPY_PIPELINE][STRIP_INSTRUMENTS_LABEL_FAILED]', {
-          error: e && e.stack ? e.stack : String(e),
-        });
-        return String(text == null ? '' : text);
+      const normalizer = (
+        typeof window !== 'undefined'
+        && (window.ToolboxTextNormalizer || window.TextNormalizer)
+      ) || (typeof TextNormalizer !== 'undefined' ? TextNormalizer : null);
+      if (normalizer && typeof normalizer.stripLabel === 'function') {
+        return normalizer.stripLabel(text);
       }
+      console.error('[TEXT_NORMALIZER][MISSING] fn=stripLabel');
+      return String(text == null ? '' : text);
     }
 
     function collapseInstrumentsCalculatorReply(text) {
-      try {
-        const normalizer = (
-          typeof window !== 'undefined' && window.TextNormalizer
-        ) ? window.TextNormalizer : (
-          typeof TextNormalizer !== 'undefined' ? TextNormalizer : null
-        );
-        if (normalizer && typeof normalizer.collapseInstrumentsCalculatorReply === 'function') {
-          return normalizer.collapseInstrumentsCalculatorReply(text);
-        }
-        console.error('[COPY_PIPELINE][TEXT_NORMALIZER_MISSING]', {
-          fn: 'collapseInstrumentsCalculatorReply',
-        });
-        return String(text == null ? '' : text);
-      } catch (e) {
-        console.error('[COPY_PIPELINE][COLLAPSE_CALCULATOR_REPLY_FAILED]', {
-          error: e && e.stack ? e.stack : String(e),
-        });
-        return String(text == null ? '' : text);
+      const normalizer = (
+        typeof window !== 'undefined'
+        && (window.ToolboxTextNormalizer || window.TextNormalizer)
+      ) || (typeof TextNormalizer !== 'undefined' ? TextNormalizer : null);
+      if (normalizer && typeof normalizer.collapseInstrumentsCalculatorReply === 'function') {
+        return normalizer.collapseInstrumentsCalculatorReply(text);
       }
+      console.error('[TEXT_NORMALIZER][MISSING] fn=collapseInstrumentsCalculatorReply');
+      return String(text == null ? '' : text);
     }
 
     function sanitizeCopiedAssistantText(rawText) {

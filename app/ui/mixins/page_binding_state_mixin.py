@@ -534,12 +534,7 @@ class PageBindingStateMixin:
                 if not silent:
                     self._add_system_message(reject_msg)
                 return False
-        page_url = (
-            client_info.get("url")
-            or client_info.get("url")
-            or (client_info.get("url") or "")
-            or ""
-        ).strip()
+        page_url = str(client_info.get("url") or "").strip()
         conversation_id = (
             client_info.get("conversation_id")
             or parse_conversation_id(page_url)

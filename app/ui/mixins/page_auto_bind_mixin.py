@@ -224,12 +224,7 @@ class PageAutoBindMixin:
         if not isinstance(client_info, dict):
             return False, ""
 
-        page_url = (
-            client_info.get("url")
-            or client_info.get("url")
-            or (client_info.get("url") or "")
-            or ""
-        ).strip()
+        page_url = str(client_info.get("url") or "").strip()
         page_type = (client_info.get("page_type") or "").strip()
         conversation_id = (
             client_info.get("conversation_id") or parse_conversation_id(page_url) or ""
@@ -1998,12 +1993,7 @@ class PageAutoBindMixin:
                 if not silent:
                     self._add_system_message(reject_msg)
                 return False
-        page_url = (
-            client_info.get("url")
-            or client_info.get("url")
-            or (client_info.get("url") or "")
-            or ""
-        ).strip()
+        page_url = str(client_info.get("url") or "").strip()
         client_id = (client_info.get("client_id") or "").strip()
         conversation_id = (
             client_info.get("conversation_id") or parse_conversation_id(page_url) or ""

@@ -48,7 +48,6 @@ caches/
 dist/
 build/
 chatgpt-toolbox/dist/
-client.user.js
 
 # Node dependencies
 node_modules/

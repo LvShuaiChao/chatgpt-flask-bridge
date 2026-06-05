@@ -12,7 +12,7 @@
 - **敏感路径始终排除**（不受 ``--include-runtime-state`` 影响）：``config/account_profiles.json``、``config/local/``、密码库、``runtime/browser_profiles/``、``runs/`` 等；导出时打印 ``[EXPORT_EXCLUDE]`` 统计。
 - **统计两类维度**：（1）**行数**——仅收录源码文件行数之和；（2）**Token**——源码合计与合并全文 ``cl100k_base`` 计数，并对照 ``CHATGPT_DOCUMENT_TOKEN_LIMIT``（默认 200 万）。需 ``pip install tiktoken`` 才有 Token 与上限余量。
 - **性能**：默认多线程读取/合并各 FILE 块（``--workers``，0=自动）；分片 zip 并行；合并阶段缓存读盘结果避免重复 IO；zip 使用较快 DEFLATE 压缩级别。
-- **油猴模块化**：若存在 ``chatgpt-toolbox/``，每轮导出前可尝试 ``npm run build``；合并包只收录 ``tampermonkey-userscript-src/``，排除 ``chatgpt-toolbox/dist/client.user.js`` 与根目录 ``client.user.js`` 构建产物。
+- **油猴模块化**：若存在 ``chatgpt-toolbox/``，每轮导出前可尝试 ``npm run build``；合并包只收录 ``tampermonkey-userscript-src/``，排除 ``chatgpt-toolbox/dist/client.user.js`` 与根目录 ``client.user.js`` 构建产物（Git 提交收录根目录 ``client.user.js``，便于按提交恢复单文件脚本）。
 """
 
 from __future__ import annotations
@@ -400,7 +400,7 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
         return True
     if SLIM_SKIP_EXPORT_SCRIPT and rel == "export_for_chatgpt.py":
         return True
-    # 油猴构建产物：只分析 tampermonkey-userscript-src/
+    # 油猴构建产物：合并包只分析 tampermonkey-userscript-src/（Git 单独跟踪根目录 client.user.js）
     if rel == "client.user.js":
         return True
     if rel == USERSCRIPT_DIST_REL.lower():

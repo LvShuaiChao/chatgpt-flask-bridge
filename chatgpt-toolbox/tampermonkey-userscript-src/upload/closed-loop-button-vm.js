@@ -373,11 +373,17 @@
       }
       if (!authoritySnapshot) {
         authoritySnapshot = {
-          replyBusy: false,
-          taskBusy: false,
+          replyBusy: true,
+          taskBusy: true,
           attachmentBusy: false,
           pendingSend: false,
+          closedLoopRunning: false,
+          inputable: false,
+          sendable: false,
+          realSendReady: false,
           sendPhase: 'authority_missing',
+          disabledReason: 'authority_missing',
+          buttonColorRole: 'blocked',
         };
       }
       const busy = authoritySnapshot.replyBusy === true

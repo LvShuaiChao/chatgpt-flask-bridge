@@ -163,6 +163,41 @@
     return false;
   }
 
+  function resolveComposerSendAuthorityForPrecheck(source) {
+    try {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.getToolboxAuthorityState === 'function'
+      ) {
+        const authority = UploadModule.getToolboxAuthorityState(`composer-send-precheck:${source}`, {
+          force: true,
+          cacheTtlMs: 0,
+        });
+        if (authority && authority.flags) {
+          return authority;
+        }
+      }
+    } catch (error) {
+      console.error('[SEND_PIPELINE][AUTHORITY_PRECHECK_FAILED]', error);
+    }
+    return null;
+  }
+
+  function isAssistantBusyByAuthorityForComposerSend(authority) {
+    if (!authority || !authority.flags) {
+      return null;
+    }
+    const replyState = authority.reply
+      ? String(authority.reply.state || '').trim().toLowerCase()
+      : '';
+    return !!(
+      authority.flags.replyBusy === true
+      || replyState === 'answering'
+      || (authority.composer && authority.composer.hasRealStopButton === true)
+    );
+  }
+
   async function composerSendWriteAndVerifyText(text, ctx) {
     const target = String(text || '');
 
@@ -437,24 +472,52 @@
       return fail;
     }
 
-    if (
-      waitForReplyIdle
-      && typeof detectComposerResponseState === 'function'
-    ) {
-      const homeReady = typeof isHomeNewChatReadyToSendNow === 'function'
-        && isHomeNewChatReadyToSendNow();
-      const responseState = detectComposerResponseState({ light: true }) || {};
-      if (responseState.is_responding && !homeReady) {
-        const fail = buildComposerSendResult(ctx, {
-          ok: false,
-          reason: 'assistant-busy',
-          detail: mapComposerSendReasonToChinese('assistant-busy'),
-          inputable: !!responseState.can_accept_input,
-          sendable: !!responseState.can_send_now,
-          elapsedMs: Date.now() - startedAt,
-        });
-        composerSendLog('[COMPOSER_SEND][FAILED]', fail);
-        return fail;
+    if (waitForReplyIdle) {
+      const authority = resolveComposerSendAuthorityForPrecheck(source);
+      const authorityAssistantBusy = isAssistantBusyByAuthorityForComposerSend(authority);
+
+      if (authorityAssistantBusy !== null) {
+        if (authorityAssistantBusy) {
+          const flags = authority.flags || {};
+          const reply = authority.reply || {};
+          composerSendPipelineLog('[SEND_PIPELINE][AUTHORITY_ASSISTANT_BUSY]', Object.assign({}, ctx, {
+            replyState: String(reply.state || '-'),
+            replyBusy: flags.replyBusy === true ? 1 : 0,
+            canSend: flags.canSend === true ? 1 : 0,
+            canInput: flags.canInput === true ? 1 : 0,
+            hasStopButton: authority.composer && authority.composer.hasRealStopButton ? 1 : 0,
+          }));
+          const fail = buildComposerSendResult(ctx, {
+            ok: false,
+            reason: 'assistant-busy',
+            detail: mapComposerSendReasonToChinese('assistant-busy'),
+            inputable: flags.canInput === true,
+            sendable: flags.canSend === true,
+            elapsedMs: Date.now() - startedAt,
+          });
+          composerSendLog('[COMPOSER_SEND][FAILED]', fail);
+          return fail;
+        }
+      } else if (typeof detectComposerResponseState === 'function') {
+        const homeReady = typeof isHomeNewChatReadyToSendNow === 'function'
+          && isHomeNewChatReadyToSendNow();
+        const responseState = detectComposerResponseState({ light: true }) || {};
+        if (responseState.is_responding && !homeReady) {
+          composerSendPipelineLog('[SEND_PIPELINE][DETECT_FALLBACK_ASSISTANT_BUSY]', Object.assign({}, ctx, {
+            isResponding: responseState.is_responding ? 1 : 0,
+            homeReady: homeReady ? 1 : 0,
+          }));
+          const fail = buildComposerSendResult(ctx, {
+            ok: false,
+            reason: 'assistant-busy',
+            detail: mapComposerSendReasonToChinese('assistant-busy'),
+            inputable: !!responseState.can_accept_input,
+            sendable: !!responseState.can_send_now,
+            elapsedMs: Date.now() - startedAt,
+          });
+          composerSendLog('[COMPOSER_SEND][FAILED]', fail);
+          return fail;
+        }
       }
     }
 

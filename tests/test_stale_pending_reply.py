@@ -47,6 +47,9 @@ class _PendingHost(SessionMixin, SendFlowMixin, BridgeMixin):
     def _is_session_unbound(self, session):
         return False
 
+    def _is_temp_home_bound_state(self, bind_state):
+        return False
+
     def _is_finalized(self, bridge_message_id):
         return bridge_message_id in self._bridge_msg.finalized_bridge_message_ids
 

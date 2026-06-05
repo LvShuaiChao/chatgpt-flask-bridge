@@ -86,6 +86,18 @@
     completed: { phase: 'success', subPhase: 'completed' },
     danger: { phase: 'waiting', subPhase: 'danger' },
     disabled: { phase: 'idle', subPhase: 'disabled' },
+    waiting_composer: { phase: 'waiting_send', subPhase: 'waiting_composer' },
+    preparing: { phase: 'waiting_send', subPhase: 'preparing' },
+    ready_to_click: { phase: 'waiting_send', subPhase: 'ready_to_click' },
+    clicking_send: { phase: 'sending', subPhase: 'clicking_send' },
+    writing_text: { phase: 'sending', subPhase: 'writing_text' },
+    sent_waiting_response: { phase: 'waiting_reply', subPhase: 'sent_waiting_response' },
+    stopping_response: { phase: 'waiting_reply', subPhase: 'stopping_response' },
+    done: { phase: 'success', subPhase: 'done' },
+    error: { phase: 'failed', subPhase: 'error' },
+    fail: { phase: 'failed', subPhase: 'fail' },
+    cancel: { phase: 'cancelled', subPhase: 'cancel' },
+    canceled: { phase: 'cancelled', subPhase: 'canceled' },
   });
 
   function normalizeButtonTaskMainPhase(phase) {

@@ -212,6 +212,16 @@
       window.ToolboxClosedLoopConfig = window.ToolboxClosedLoopConfig || {};
       window.ToolboxClosedLoopConfig.normalizeClosedLoopAction = normalizeClosedLoopAction;
       window.ToolboxClosedLoopConfig.getClosedLoopButtonLabel = getClosedLoopButtonLabel;
+      window.ToolboxClosedLoopConfig.getClosedLoopUploadPolicyText = getClosedLoopUploadPolicyText;
+      window.ToolboxClosedLoopConfig.getClosedLoopStepSourcePolicyTag = getClosedLoopStepSourcePolicyTag;
+      window.ToolboxClosedLoopConfig.getClosedLoopStepSourceTag = getClosedLoopStepSourceTag;
+      window.ToolboxClosedLoopConfig.isClosedLoopStepSource = isClosedLoopStepSource;
+      window.ToolboxClosedLoopConfig.parseClosedLoopStepRound = parseClosedLoopStepRound;
+      window.ToolboxClosedLoopConfig.getClosedLoopUploadFailedSource = getClosedLoopUploadFailedSource;
+      window.ToolboxClosedLoopConfig.getClosedLoopModeLabel = getClosedLoopModeLabel;
+      window.ToolboxClosedLoopConfig.getClosedLoopContinueActionDef = getClosedLoopContinueActionDef;
+      window.ToolboxClosedLoopConfig.isClosedLoopEveryRoundUploadMode = isClosedLoopEveryRoundUploadMode;
+      window.ToolboxClosedLoopConfig.getClosedLoopEffectiveUploadInterval = getClosedLoopEffectiveUploadInterval;
     }
 
     return Object.freeze({

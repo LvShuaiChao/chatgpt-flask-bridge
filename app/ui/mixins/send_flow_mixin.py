@@ -37,11 +37,6 @@ class SendFlowMixin:
         if callable(save_fn):
             save_fn()
 
-    def _is_temp_home_bound_state(self, bind_state: str) -> bool:
-        from app.models import is_temp_home_bound_state
-
-        return is_temp_home_bound_state(bind_state)
-
     def _session_bootstrap_message_id(self, session) -> str:
         if session is None:
             return ""

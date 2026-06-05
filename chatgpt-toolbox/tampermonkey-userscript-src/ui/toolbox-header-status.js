@@ -497,7 +497,7 @@
       if (waitingSend) {
         chips.push({
           key: 'waiting-send',
-          text: '待发送',
+          text: '可发送',
           level: 'warning',
           priority: 90,
         });

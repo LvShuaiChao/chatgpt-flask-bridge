@@ -56,6 +56,7 @@ const ToolboxActionRegistry = (() => {
     [ACTION.COPY_HOTKEY_ONCE]: 'copy-and-hotkey',
     [ACTION.COPY_AND_CONTINUE]: 'copy-and-continue',
     [ACTION.COPY_HOTKEY_CONTINUE_ONCE]: 'copy-hotkey-continue',
+    [ACTION.COPY_HOTKEY_CONTINUE_LOOP]: 'loop-copy-hotkey-continue',
   });
 
   const CLOSED_LOOP_CANONICAL = new Set([

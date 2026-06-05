@@ -236,6 +236,61 @@
       return g ? g.name : '未命名组';
     }
 
+    function markUploadGroupChipsActiveFast(targetGroupId, reason = '-') {
+      const normalizedTargetGroupId = String(targetGroupId || '').trim();
+      if (!normalizedTargetGroupId) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][FAST_ACTIVE_SKIP] reason=${String(reason || '-')} target=-`,
+        );
+        return false;
+      }
+      const groupListEl = refs && refs.groupListEl ? refs.groupListEl : null;
+      if (!groupListEl) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][FAST_ACTIVE_SKIP] reason=${String(reason || '-')} target=${normalizedTargetGroupId} cause=group-list-missing`,
+        );
+        return false;
+      }
+      const chips = groupListEl.querySelectorAll('.cgpt-upload-group-chip[data-group-id]');
+      chips.forEach((chip) => {
+        const chipGroupId = String(chip.getAttribute('data-group-id') || '').trim();
+        const isActive = chipGroupId === normalizedTargetGroupId;
+        chip.classList.toggle('active', isActive);
+        if (isActive) {
+          chip.setAttribute('aria-current', 'true');
+        } else {
+          chip.removeAttribute('aria-current');
+        }
+      });
+      appendUploadLog(
+        `[UPLOAD_GROUP][FAST_ACTIVE_OK] reason=${String(reason || '-')} target=${normalizedTargetGroupId} chips=${chips.length}`,
+      );
+      return true;
+    }
+
+    function showUploadGroupSwitchingPlaceholder(targetGroupId, reason = '-') {
+      const normalizedTargetGroupId = String(targetGroupId || '').trim();
+      const targetGroup = state.groups.find((group) => {
+        return group && String(group.id || '').trim() === normalizedTargetGroupId;
+      }) || null;
+      const targetName = targetGroup ? stripTrailingCountFromGroupName(targetGroup.name || '') : '当前文件组';
+      if (!refs || !refs.listEl) {
+        appendUploadLog(
+          `[UPLOAD_GROUP][SWITCH_PLACEHOLDER_SKIP] reason=${String(reason || '-')} target=${normalizedTargetGroupId || '-'} cause=list-missing`,
+        );
+        return false;
+      }
+      refs.listEl.innerHTML = `
+    <div class="cgpt-empty-state cgpt-upload-switching-placeholder">
+      正在切换到 ${targetName || '当前文件组'}，请稍候...
+    </div>
+  `;
+      appendUploadLog(
+        `[UPLOAD_GROUP][SWITCH_PLACEHOLDER_OK] reason=${String(reason || '-')} target=${normalizedTargetGroupId || '-'} name=${targetName || '-'}`,
+      );
+      return true;
+    }
+
     function normalizeUploadFolderPath(value) {
       return String(value || '')
         .replace(/\\/g, '/')
@@ -560,6 +615,20 @@
     async function applyUploadGlobalSyncMessage(message, source) {
       const incomingGroupId = String(message && message.activeGroupId || '').trim();
       const localGroupId = String(state.activeGroupId || '').trim();
+      const messageReason = String(message && message.reason || '').trim();
+      const payload = message && message.payload && typeof message.payload === 'object'
+        ? message.payload
+        : {};
+      if (
+        messageReason === 'switch-group'
+        || payload.pageOnly === true
+        || payload.activeGroupOnly === true
+      ) {
+        ToolboxShell.appendLog(
+          `[UPLOAD_GLOBAL_SYNC][IGNORE_PAGE_LOCAL_ACTIVE_GROUP] source=${source || '-'} reason=${messageReason || '-'} incoming=${incomingGroupId || '-'} local=${localGroupId || '-'}`,
+        );
+        return;
+      }
 
       if (incomingGroupId) {
         ToolboxShell.appendLog(
@@ -701,11 +770,28 @@
       const prevSelectedFileIdByGroup = {
         ...(state.selectedFileIdByGroup || {}),
       };
+      const switchToken = createId('upload_group_switch');
       state.switchingUploadGroup = true;
       state.switchingUploadGroupTargetId = targetGroupId;
+      state.switchingUploadGroupToken = switchToken;
       try {
         state.activeGroupId = targetGroupId;
         state.activeId = '';
+        syncUploadGroupAppState();
+        markUploadGroupChipsActiveFast(targetGroupId, reasonText);
+        showUploadGroupSwitchingPlaceholder(targetGroupId, reasonText);
+        renderUploadButtonsOnly({
+          immediate: true,
+          force: true,
+          buttonTasksReason: 'switch-group:instant-ui',
+        });
+        appendUploadGroupLog('SWITCH', {
+          phase: 'instant-ui',
+          fromGroupId: prevActiveGroupId || '-',
+          targetGroupId,
+          token: switchToken,
+          reason: reasonText,
+        });
         savePageSelectedUploadGroupId(targetGroupId, reasonText);
         if (options.saveLastManual !== false) {
           saveLastManualUploadGroupId(targetGroupId, reasonText);
@@ -730,6 +816,24 @@
           skipRefreshCounts: true,
           skipMigration: true,
         });
+        if (
+          String(state.switchingUploadGroupToken || '') !== switchToken
+          || String(state.activeGroupId || '').trim() !== targetGroupId
+        ) {
+          appendUploadGroupLog('SWITCH', {
+            phase: 'stale-result-ignored',
+            fromGroupId: prevActiveGroupId || '-',
+            targetGroupId,
+            currentActiveGroupId: state.activeGroupId || '-',
+            token: switchToken,
+            currentToken: state.switchingUploadGroupToken || '-',
+            reason: reasonText,
+          });
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][SWITCH_STALE_IGNORED] from=${prevActiveGroupId || '-'} target=${targetGroupId} current=${state.activeGroupId || '-'} token=${switchToken} currentToken=${state.switchingUploadGroupToken || '-'}`,
+          );
+          return false;
+        }
         saveMultiUploadSelectionForActiveGroup();
         renderProjectCategoryChips();
         renderUploadListOnly('switch-group:fast', { force: true });
@@ -766,28 +870,36 @@
               `[UPLOAD_GROUP][COUNT_REFRESH_ASYNC_FAILED] target=${targetGroupId} error=${errText}`,
             );
           });
-        broadcastUploadGlobalStateChanged('switch-group', {
-          sourceReason: reasonText,
-          activeGroupId: targetGroupId,
-        });
+        ToolboxShell.appendLog(
+          `[UPLOAD_GLOBAL_SYNC][SKIP_ACTIVE_GROUP_BROADCAST] reason=${reasonText} activeGroupId=${targetGroupId} note=active-group-is-page-local`,
+        );
         return true;
       } catch (e) {
         const errName = e && e.name ? e.name : 'Error';
         const errText = e && e.message ? e.message : String(e);
-        state.activeGroupId = prevActiveGroupId;
-        state.activeId = prevActiveId;
-        state.queue = prevQueue;
-        state.selectedFileIdByGroup = prevSelectedFileIdByGroup;
-        renderProjectCategoryChips();
-        renderUploadListOnly('switch-group:rollback', { force: true });
-        renderUploadButtonsOnly({
-          immediate: true,
-          force: true,
-          buttonTasksReason: 'switch-group:rollback',
-        });
-        syncGroupManagePanel({
-          force: true,
-        });
+        const isCurrentSwitch = String(state.switchingUploadGroupToken || '') === switchToken;
+        if (isCurrentSwitch) {
+          state.activeGroupId = prevActiveGroupId;
+          state.activeId = prevActiveId;
+          state.queue = prevQueue;
+          state.selectedFileIdByGroup = prevSelectedFileIdByGroup;
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][SWITCH_ROLLBACK_SKIP_STALE] from=${prevActiveGroupId || '-'} target=${targetGroupId} current=${state.activeGroupId || '-'} token=${switchToken} currentToken=${state.switchingUploadGroupToken || '-'}`,
+          );
+        }
+        if (isCurrentSwitch) {
+          renderProjectCategoryChips();
+          renderUploadListOnly('switch-group:rollback', { force: true });
+          renderUploadButtonsOnly({
+            immediate: true,
+            force: true,
+            buttonTasksReason: 'switch-group:rollback',
+          });
+          syncGroupManagePanel({
+            force: true,
+          });
+        }
         console.error('[ChatGPT toolbox] switchGroup failed', e);
         setStatus(`切换分组失败，已恢复原分组：${errText}`, 'error');
         ToolboxShell.appendLog(
@@ -795,8 +907,15 @@
         );
         throw e;
       } finally {
-        state.switchingUploadGroup = false;
-        state.switchingUploadGroupTargetId = '';
+        if (String(state.switchingUploadGroupToken || '') === switchToken) {
+          state.switchingUploadGroup = false;
+          state.switchingUploadGroupTargetId = '';
+          state.switchingUploadGroupToken = '';
+        } else {
+          ToolboxShell.appendLog(
+            `[UPLOAD_GROUP][SWITCH_FINALIZE_SKIP_STALE] target=${targetGroupId} token=${switchToken} currentToken=${state.switchingUploadGroupToken || '-'}`,
+          );
+        }
       }
     }
 

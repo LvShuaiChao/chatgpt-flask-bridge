@@ -825,6 +825,36 @@
       }
     }
 
+    const TOOLBOX_RUNNING_OWNER_VISUAL_TTL_MS = 2500;
+
+    function getFreshToolboxRunningOwnerSnapshot(reason = '') {
+      if (typeof window === 'undefined') {
+        return null;
+      }
+      const owner = window.__cgptToolboxRunningOwner;
+      if (!owner || typeof owner !== 'object') {
+        return null;
+      }
+      const action = String(owner.action || owner.owner || owner.taskKey || '').trim();
+      const ts = Number(owner.updatedAt || owner.startedAt || owner.ts || 0);
+      const fresh = !!(
+        action
+        && Number.isFinite(ts)
+        && ts > 0
+        && Date.now() - ts <= TOOLBOX_RUNNING_OWNER_VISUAL_TTL_MS
+      );
+      if (!fresh) {
+        ToolboxShell.appendLog(
+          `[RUNNING_OWNER][STALE_CLEAR] reason=${reason || '-'} `
+          + `action=${action || '-'} phase=${owner.phase || '-'} `
+          + `startedAt=${owner.startedAt || 0} updatedAt=${owner.updatedAt || 0}`,
+        );
+        window.__cgptToolboxRunningOwner = null;
+        return null;
+      }
+      return Object.assign({}, owner);
+    }
+
     const SEND_FAMILY_ACTIONS = new Set([
       'send-message',
       'send-copy-hotkey',
@@ -4453,10 +4483,23 @@
     }
 
     function isClosedLoopEveryRoundUploadMode(mode) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.isClosedLoopEveryRoundUploadMode === 'function') {
+        return api.isClosedLoopEveryRoundUploadMode(mode);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=isClosedLoopEveryRoundUploadMode');
       return String(mode || '').trim() === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND;
     }
 
     function getClosedLoopEffectiveUploadInterval(mode, cfg = null) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopEffectiveUploadInterval === 'function') {
+        const resolvedCfg = cfg && typeof cfg === 'object'
+          ? cfg
+          : getClosedLoopAutomationConfig();
+        return api.getClosedLoopEffectiveUploadInterval(mode, resolvedCfg);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopEffectiveUploadInterval');
       if (isClosedLoopEveryRoundUploadMode(mode)) {
         return 1;
       }
@@ -4467,35 +4510,73 @@
       return Number.isFinite(interval) && interval > 0 ? Math.floor(interval) : 5;
     }
 
+    function getClosedLoopConfigApi() {
+      if (typeof ClosedLoopConfig !== 'undefined' && ClosedLoopConfig) {
+        return ClosedLoopConfig;
+      }
+      if (
+        typeof window !== 'undefined'
+        && window.ToolboxClosedLoopConfig
+      ) {
+        return window.ToolboxClosedLoopConfig;
+      }
+      return null;
+    }
+
     function getClosedLoopUploadPolicyText(mode, cfg = null) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopUploadPolicyText === 'function') {
+        return api.getClosedLoopUploadPolicyText(mode, cfg);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopUploadPolicyText');
       const interval = getClosedLoopEffectiveUploadInterval(mode, cfg);
-      const everyRoundLabel = (
-        typeof ClosedLoopConfig !== 'undefined'
-        && ClosedLoopConfig
-        && ClosedLoopConfig.CLOSED_LOOP_UPLOAD_EVERY_ROUND_LABEL
-      ) || '每1轮上传';
-      return interval <= 1 ? everyRoundLabel : `每${interval}轮上传`;
+      return interval <= 1 ? '每1轮上传' : `每${interval}轮上传`;
     }
 
     function getClosedLoopStepSourcePolicyTag(mode) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopStepSourcePolicyTag === 'function') {
+        return api.getClosedLoopStepSourcePolicyTag(mode);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopStepSourcePolicyTag');
       return isClosedLoopEveryRoundUploadMode(mode) ? 'every-round' : 'every-n';
     }
 
     function getClosedLoopStepSourceTag(mode, round) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopStepSourceTag === 'function') {
+        return api.getClosedLoopStepSourceTag(mode, round);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopStepSourceTag');
       const n = Math.max(0, Number(round) || 0);
       return `closed-loop-${getClosedLoopStepSourcePolicyTag(mode)}-${n}`;
     }
 
     function isClosedLoopStepSource(sourceText) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.isClosedLoopStepSource === 'function') {
+        return api.isClosedLoopStepSource(sourceText);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=isClosedLoopStepSource');
       return /^closed-loop-every(?:5|n|round)-\d+$/.test(String(sourceText || ''));
     }
 
     function parseClosedLoopStepRound(sourceText) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.parseClosedLoopStepRound === 'function') {
+        return api.parseClosedLoopStepRound(sourceText);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=parseClosedLoopStepRound');
       const match = String(sourceText || '').match(/closed-loop-every(?:5|n|round)-(\d+)/);
       return match ? Number(match[1]) || 0 : 0;
     }
 
     function getClosedLoopUploadFailedSource(useHotkey, round, mode) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopUploadFailedSource === 'function') {
+        return api.getClosedLoopUploadFailedSource(useHotkey, round, mode);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopUploadFailedSource');
       const uploadEveryRound = isClosedLoopEveryRoundUploadMode(mode);
       if (useHotkey) {
         return round === 1
@@ -4555,10 +4636,21 @@
     }
 
     function getClosedLoopModeLabel(mode) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopModeLabel === 'function') {
+        const closedLoopCfg = getClosedLoopAutomationConfig();
+        return api.getClosedLoopModeLabel(mode, closedLoopCfg);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopModeLabel');
       return getClosedLoopButtonLabel(mode);
     }
 
     function getClosedLoopContinueActionDef(mode) {
+      const api = getClosedLoopConfigApi();
+      if (api && typeof api.getClosedLoopContinueActionDef === 'function') {
+        return api.getClosedLoopContinueActionDef(mode);
+      }
+      console.error('[CLOSED_LOOP_CONFIG][MISSING] fn=getClosedLoopContinueActionDef');
       if (mode === CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY) {
         return CLOSED_LOOP_CONTINUE_ACTIONS.WITHOUT_HOTKEY;
       }
@@ -4836,6 +4928,13 @@
       doneVerificationRunning: false,
       doneVerificationSent: false,
       doneVerificationRound: 0,
+      terminalStopHitCount: 0,
+      terminalStopFirstHitAtMs: 0,
+      terminalStopLastHitAtMs: 0,
+      terminalStopLastRound: 0,
+      terminalStopHardStopped: false,
+      terminalStopHardStopReason: '',
+      terminalStopLastSignal: '',
       homeNavigationRunning: false,
       lastHomeNavigationRound: 0,
       sendFailedStreak: 0,
@@ -4891,6 +4990,169 @@
       lastClosedLoopHotkeyCopiedText: '',
       lastClosedLoopHotkeyAssistantKey: '',
     };
+
+    const CLOSED_LOOP_START_PENDING_STORAGE_KEY = 'xz_toolbox_closed_loop_start_pending_v2';
+    const CLOSED_LOOP_START_PENDING_MAX_AGE_MS = 20 * 60 * 1000;
+    function getClosedLoopStartPendingStorage() {
+      try {
+        if (typeof sessionStorage !== 'undefined') {
+          return sessionStorage;
+        }
+      } catch (error) {
+        console.error('[CLOSED_LOOP][START_PENDING_STORAGE_SESSION_UNAVAILABLE]', error);
+      }
+      try {
+        if (typeof localStorage !== 'undefined') {
+          return localStorage;
+        }
+      } catch (error) {
+        console.error('[CLOSED_LOOP][START_PENDING_STORAGE_LOCAL_UNAVAILABLE]', error);
+      }
+      return null;
+    }
+    function persistClosedLoopStartPending(reason = '-') {
+      const pending = closedLoopContinueState.startPending;
+      const storage = getClosedLoopStartPendingStorage();
+      if (!pending || !storage) {
+        return false;
+      }
+      const payload = {
+        version: 2,
+        mode: String(pending.mode || CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY),
+        action: String(pending.action || getCurrentClosedLoopOwnerActionForMode(pending.mode)),
+        source: String(pending.source || 'button'),
+        reason: String(pending.reason || '-'),
+        createdAt: Number(pending.createdAt || Date.now()),
+        savedAt: Date.now(),
+        url: String(location.href || ''),
+        pathname: String(location.pathname || ''),
+        conversationId: typeof parseConversationIdFromPath === 'function'
+          ? String(parseConversationIdFromPath(location.pathname || '') || '')
+          : '',
+      };
+      try {
+        storage.setItem(CLOSED_LOOP_START_PENDING_STORAGE_KEY, JSON.stringify(payload));
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_PERSIST] reason=${reason || '-'} mode=${payload.mode} action=${payload.action} createdAt=${payload.createdAt} url=${payload.url}`,
+        );
+        return true;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][START_PENDING_PERSIST_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_PERSIST_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+        return false;
+      }
+    }
+    function readPersistedClosedLoopStartPending(reason = '-') {
+      const storage = getClosedLoopStartPendingStorage();
+      if (!storage) {
+        return null;
+      }
+      let raw = '';
+      try {
+        raw = String(storage.getItem(CLOSED_LOOP_START_PENDING_STORAGE_KEY) || '');
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][START_PENDING_READ_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_READ_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+        return null;
+      }
+      if (!raw) {
+        return null;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][START_PENDING_READ_INVALID] reason=${reason || '-'} type=${typeof parsed}`,
+          );
+          return null;
+        }
+        const savedAt = Number(parsed.savedAt || parsed.createdAt || 0);
+        const ageMs = savedAt > 0 ? Date.now() - savedAt : Number.POSITIVE_INFINITY;
+        if (ageMs > CLOSED_LOOP_START_PENDING_MAX_AGE_MS) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][START_PENDING_EXPIRED] reason=${reason || '-'} ageMs=${ageMs}`,
+          );
+          clearPersistedClosedLoopStartPending(`expired:${reason}`);
+          return null;
+        }
+        const mode = String(parsed.mode || CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY).trim()
+          || CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY;
+        const action = String(parsed.action || getCurrentClosedLoopOwnerActionForMode(mode)).trim()
+          || getCurrentClosedLoopOwnerActionForMode(mode);
+        return {
+          mode,
+          action,
+          source: String(parsed.source || `restore:${reason || '-'}`).trim() || `restore:${reason || '-'}`,
+          reason: String(parsed.reason || 'restored-pending').trim() || 'restored-pending',
+          createdAt: Number(parsed.createdAt || savedAt || Date.now()),
+          restoredAt: Date.now(),
+          restoredFromStorage: true,
+          savedUrl: String(parsed.url || ''),
+          savedPathname: String(parsed.pathname || ''),
+          savedConversationId: String(parsed.conversationId || ''),
+        };
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][START_PENDING_PARSE_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_PARSE_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+        clearPersistedClosedLoopStartPending(`parse-failed:${reason}`);
+        return null;
+      }
+    }
+    function clearPersistedClosedLoopStartPending(reason = '-') {
+      const storage = getClosedLoopStartPendingStorage();
+      if (!storage) {
+        return;
+      }
+      try {
+        storage.removeItem(CLOSED_LOOP_START_PENDING_STORAGE_KEY);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_PERSIST_CLEAR] reason=${reason || '-'}`,
+        );
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][START_PENDING_PERSIST_CLEAR_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_PERSIST_CLEAR_FAILED] reason=${reason || '-'} error=${errText}`,
+        );
+      }
+    }
+    function restoreClosedLoopStartPendingIfNeeded(reason = '-') {
+      if (closedLoopContinueState.running === true) {
+        return false;
+      }
+      if (closedLoopContinueState.startPending) {
+        startClosedLoopStartPendingWatcher(`restore-existing:${reason || '-'}`);
+        return true;
+      }
+      const pending = readPersistedClosedLoopStartPending(reason);
+      if (!pending) {
+        return false;
+      }
+      closedLoopContinueState.startPending = pending;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][START_PENDING_RESTORE]',
+          `reason=${reason || '-'}`,
+          `mode=${pending.mode || '-'}`,
+          `action=${pending.action || '-'}`,
+          `source=${pending.source || '-'}`,
+          `savedUrl=${pending.savedUrl || '-'}`,
+          `currentUrl=${location.href || '-'}`,
+        ].join(' '),
+      );
+      startClosedLoopStartPendingWatcher(`restore:${reason || '-'}`);
+      renderClosedLoopContinueButtons();
+      return true;
+    }
 
     function buildClosedLoopHotkeyRoundKey(runId, round) {
       const safeRunId = String(runId || '').trim();
@@ -4957,6 +5219,7 @@
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][WAIT_CURRENT_REPLY_BEFORE_START] action=${action} reason=${responseReason}`,
       );
+      persistClosedLoopStartPending(`set:${source || '-'}`);
       setStatus('页面正在回复，已排队等待回复完成后启动闭环', 'running');
       renderClosedLoopContinueButtons();
       startClosedLoopStartPendingWatcher('set-closed-loop-start-pending');
@@ -4965,6 +5228,7 @@
     function clearClosedLoopStartPending(reason = '-') {
       const old = getClosedLoopStartPending();
       closedLoopContinueState.startPending = null;
+      clearPersistedClosedLoopStartPending(reason);
       if (old) {
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][START_PENDING_CLEAR] action=${old.action || '-'} reason=${String(reason || '-')}`,
@@ -5324,8 +5588,18 @@
     }
 
     async function flushClosedLoopStartPendingIfReady(reason = '-') {
-      const pending = getClosedLoopStartPending();
+      let pending = getClosedLoopStartPending();
       if (!pending) {
+        const restored = restoreClosedLoopStartPendingIfNeeded(`flush:${reason || '-'}`);
+        if (!restored) {
+          return;
+        }
+        pending = getClosedLoopStartPending();
+      }
+      if (!pending) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_PENDING_FLUSH_SKIP] reason=${reason || '-'} pending=0 restored=0`,
+        );
         return;
       }
       if (closedLoopContinueState.running) {
@@ -5361,7 +5635,7 @@
       ).trim();
       clearClosedLoopStartPending(`flush-ready:${reason}`);
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][START_AFTER_REPLY_DONE] action=${action}`,
+        `[CLOSED_LOOP][START_AFTER_REPLY_DONE] action=${action} mode=${pending.mode || '-'} source=${pending.source || '-'} restored=${pending.restoredFromStorage ? 1 : 0}`,
       );
       await startClosedLoopContinue({
         reason: pending.source || `pending-flush:${reason}`,
@@ -6434,8 +6708,13 @@
         window.__cgptToolboxRunningOwner = {
           action: actionDef.action,
           buttonId: actionDef.buttonId || actionDef.id,
+          ownerButtonId: actionDef.buttonId || actionDef.id,
           taskKey: 'copyHotkeyUploadVerifyLoop',
           runId: closedLoopContinueState.runId,
+          phase: closedLoopContinueState.phase || 'running',
+          source: src,
+          startedAt: closedLoopContinueState.startedAt || Date.now(),
+          updatedAt: Date.now(),
         };
         return window.__cgptToolboxRunningOwner;
       }
@@ -13598,6 +13877,10 @@
         || text.includes('hotkey-not-sent-before-next-round')
         || text.includes('hotkey-not-sent')
         || text.includes('before-next-round')
+        || text.includes('bridge-offline')
+        || text.includes('page-offline')
+        || text.includes('local-queue-but-composer-empty')
+        || text.includes('waiting-bridge')
       );
     }
 
@@ -13873,6 +14156,15 @@
 
     function scheduleClosedLoopContinueNextStep(runId, delayMs, reason = '', options = {}) {
       const scheduleReason = String(reason || 'unknown').trim() || 'unknown';
+      if (
+        closedLoopContinueState.terminalStopHardStopped
+        || maybeHardStopClosedLoopByTerminalCount(`schedule-entry:${scheduleReason}`, closedLoopContinueState.round)
+      ) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][SCHEDULE_BLOCKED_BY_TERMINAL_HARD_STOP] runId=${runId || '-'} reason=${scheduleReason} hitCount=${closedLoopContinueState.terminalStopHitCount || 0}`,
+        );
+        return false;
+      }
       const retryCurrentRound = options && options.retryCurrentRound === true;
       const currentRound = Math.max(0, Number(closedLoopContinueState.round || 0));
       const advancingToNextRound = !retryCurrentRound && (
@@ -14093,6 +14385,15 @@
         if (typeof renderUploadButtonsOnly === 'function') {
           renderUploadButtonsOnly('closed-loop-wait-countdown-clear');
         }
+        if (
+          closedLoopContinueState.terminalStopHardStopped
+          || maybeHardStopClosedLoopByTerminalCount(`scheduled-fire:${scheduleReason}`, closedLoopContinueState.round)
+        ) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][SCHEDULED_STEP_ABORT_TERMINAL_HARD_STOP] runId=${runId || '-'} reason=${scheduleReason} hitCount=${closedLoopContinueState.terminalStopHitCount || 0}`,
+          );
+          return;
+        }
         if (!closedLoopContinueState.running || closedLoopContinueState.runId !== runId) {
           ToolboxShell.appendLog(
             [
@@ -14247,6 +14548,15 @@
 
     function recoverClosedLoopContinue(runId, reason, options = {}) {
       const recoverReason = String(reason || 'unknown').trim() || 'unknown';
+      if (
+        closedLoopContinueState.terminalStopHardStopped
+        || maybeHardStopClosedLoopByTerminalCount(`recover-entry:${recoverReason}`, closedLoopContinueState.round)
+      ) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][RECOVER_BLOCKED_BY_TERMINAL_HARD_STOP] runId=${runId || '-'} reason=${recoverReason} hitCount=${closedLoopContinueState.terminalStopHitCount || 0}`,
+        );
+        return false;
+      }
       const delayMs = Number(options.delayMs || 5000);
       const retryCurrentRound = options.retryCurrentRound !== false;
 
@@ -14272,7 +14582,13 @@
           level: 'warn',
           message: msg,
         });
-        setStatus(msg, 'warn');
+        setStatus(msg, 'warn', {
+          persist: false,
+          ttlMs: 2500,
+          hideTopAlert: true,
+          hideHeaderBadge: true,
+          shortText: '已暂停',
+        });
         renderClosedLoopContinueButtons();
         return false;
       }
@@ -14289,7 +14605,13 @@
             level: 'warn',
             message: pauseMsg,
           });
-          setStatus(pauseMsg, 'warn');
+          setStatus(pauseMsg, 'warn', {
+            persist: false,
+            ttlMs: 2500,
+            hideTopAlert: true,
+            hideHeaderBadge: true,
+            shortText: '已暂停',
+          });
           renderClosedLoopContinueButtons();
           return false;
         }
@@ -14736,34 +15058,319 @@
       return renderClosedLoopContinueButtons(snapshot);
     }
 
+    function logClosedLoopStopCause(reason, extra) {
+      let status = null;
+      let attachmentState = null;
+      try {
+        const composer = typeof readToolboxComposerEvidence === 'function'
+          ? readToolboxComposerEvidence(`closed-loop-stop-cause:${reason}`)
+          : null;
+        const localQueue = typeof readToolboxLocalQueueEvidence === 'function'
+          ? readToolboxLocalQueueEvidence(`closed-loop-stop-cause:${reason}`)
+          : null;
+        const runtime = typeof readToolboxRuntimeEvidence === 'function'
+          ? readToolboxRuntimeEvidence(`closed-loop-stop-cause:${reason}`)
+          : null;
+        const pageOffline = typeof isToolboxPageBridgeOffline === 'function'
+          ? isToolboxPageBridgeOffline(runtime)
+          : false;
+        status = {
+          sendPhase: typeof getButtonTaskPhaseSafe === 'function' ? getButtonTaskPhaseSafe('send') : '-',
+          taskState: closedLoopContinueState.running ? '闭环中' : '空闲',
+          replyState: composer && composer.inputable ? '可输入' : '-',
+          pageOffline: pageOffline ? 1 : 0,
+          realSendReady: composer && composer.realSendButtonReady ? 1 : 0,
+          localQueueCount: localQueue && localQueue.localQueueCount,
+          localQueue: localQueue && localQueue.localQueueCount,
+          localPendingCount: localQueue && localQueue.localPendingCount,
+          localPending: localQueue && localQueue.localPendingCount,
+        };
+        if (typeof getComposerAttachmentState === 'function') {
+          attachmentState = getComposerAttachmentState(`closed-loop-stop-cause:${reason}`);
+        }
+        if (composer) {
+          status.composerCount = composer.composerCount;
+          status.realSendReady = composer.realSendButtonReady ? 1 : 0;
+        }
+      } catch (error) {
+        console.error('[CLOSED_LOOP][STOP_CAUSE_SUMMARY_FAILED]', error);
+      }
+      console.warn(
+        '[CLOSED_LOOP][STOP_CAUSE_SUMMARY]',
+        'reason=' + reason,
+        'runningBefore=' + !!(closedLoopContinueState && closedLoopContinueState.running),
+        'phase=' + (closedLoopContinueState && closedLoopContinueState.phase || '-'),
+        'round=' + (closedLoopContinueState && closedLoopContinueState.round || 0),
+        'mode=' + (closedLoopContinueState && closedLoopContinueState.mode || '-'),
+        'sendPhase=' + (status && status.sendPhase || '-'),
+        'taskState=' + (status && status.taskState || '-'),
+        'replyState=' + (status && status.replyState || '-'),
+        'pageOffline=' + Number(status && (status.pageOffline ?? 0)),
+        'realSendReady=' + Number(status && (status.realSendReady ?? 0)),
+        'composerFileCount=' + Number(attachmentState && (attachmentState.fileCount ?? attachmentState.composerCount ?? (status && status.composerCount) ?? 0)),
+        'composerReady=' + Number(attachmentState && (attachmentState.ready ?? attachmentState.attachmentReady ?? 0)),
+        'localQueue=' + Number(status && (status.localQueueCount ?? status.localQueue ?? 0)),
+        'localPending=' + Number(status && (status.localPendingCount ?? status.localPending ?? 0)),
+        'extra=' + JSON.stringify(extra || {}),
+      );
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][STOP_CAUSE_SUMMARY] reason=${reason} `
+        + `round=${closedLoopContinueState.round || 0} mode=${closedLoopContinueState.mode || '-'} `
+        + `pageOffline=${Number(status && (status.pageOffline ?? 0))} `
+        + `composerFileCount=${Number(attachmentState && (attachmentState.fileCount ?? attachmentState.composerCount ?? 0))} `
+        + `localQueue=${Number(status && (status.localQueueCount ?? 0))} `
+        + `localPending=${Number(status && (status.localPendingCount ?? 0))} `
+        + `realSendReady=${Number(status && (status.realSendReady ?? 0))}`,
+      );
+    }
+
+    async function preflightClosedLoopComposerState(reason) {
+      const composer = typeof readToolboxComposerEvidence === 'function'
+        ? readToolboxComposerEvidence(`closed-loop-preflight:${reason}`)
+        : null;
+      const localQueue = typeof readToolboxLocalQueueEvidence === 'function'
+        ? readToolboxLocalQueueEvidence(`closed-loop-preflight:${reason}`)
+        : null;
+      const runtime = typeof readToolboxRuntimeEvidence === 'function'
+        ? readToolboxRuntimeEvidence(`closed-loop-preflight:${reason}`)
+        : null;
+      let attachmentState = null;
+      try {
+        if (typeof getComposerAttachmentState === 'function') {
+          attachmentState = getComposerAttachmentState(`closed-loop-preflight:${reason}`);
+        }
+      } catch (attachErr) {
+        console.error('[CLOSED_LOOP][PREFLIGHT_ATTACHMENT_STATE_FAILED]', attachErr);
+      }
+      const localQueueCount = Number(localQueue && localQueue.localQueueCount || 0) || 0;
+      const localPendingCount = Number(localQueue && localQueue.localPendingCount || 0) || 0;
+      const composerFileCount = Math.max(
+        Number(attachmentState && (attachmentState.fileCount ?? attachmentState.composerCount ?? 0)) || 0,
+        Number(composer && composer.composerCount || 0) || 0,
+      );
+      const composerReady = Number(attachmentState && (attachmentState.ready ?? attachmentState.attachmentReady ?? 0)) || 0;
+      const pageOffline = typeof isToolboxPageBridgeOffline === 'function'
+        ? (isToolboxPageBridgeOffline(runtime) ? 1 : 0)
+        : 0;
+      const realSendReady = composer && composer.realSendButtonReady ? 1 : 0;
+      console.log(
+        '[CLOSED_LOOP][PREFLIGHT]',
+        'reason=' + reason,
+        'localQueue=' + localQueueCount,
+        'localPending=' + localPendingCount,
+        'composerFileCount=' + composerFileCount,
+        'composerReady=' + composerReady,
+        'pageOffline=' + pageOffline,
+        'realSendReady=' + realSendReady,
+      );
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][PREFLIGHT] reason=${reason} localQueue=${localQueueCount} `
+        + `localPending=${localPendingCount} composerFileCount=${composerFileCount} `
+        + `composerReady=${composerReady} pageOffline=${pageOffline} realSendReady=${realSendReady}`,
+      );
+      if ((localQueueCount > 0 || localPendingCount > 0) && composerFileCount <= 0) {
+        const message = '本地队列有文件，但 ChatGPT 输入框附件检测为 0，禁止闭环继续发送，避免一轮后误停。请重新上传或刷新页面。';
+        console.warn(
+          '[CLOSED_LOOP][PREFLIGHT_BLOCK]',
+          'reason=local-queue-but-composer-empty',
+          'localQueue=' + localQueueCount,
+          'localPending=' + localPendingCount,
+          'composerFileCount=' + composerFileCount,
+          'composerReady=' + composerReady,
+          'pageOffline=' + pageOffline,
+          'realSendReady=' + realSendReady,
+        );
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][PREFLIGHT_BLOCK] reason=local-queue-but-composer-empty `
+          + `localQueue=${localQueueCount} localPending=${localPendingCount} `
+          + `composerFileCount=${composerFileCount} pageOffline=${pageOffline}`,
+        );
+        return {
+          ok: false,
+          reason: 'local-queue-but-composer-empty',
+          message,
+        };
+      }
+      return {
+        ok: true,
+        reason: 'ok',
+      };
+    }
+
+    function isClosedLoopBridgeOfflinePauseActive() {
+      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
+      const phase = String(loopTask && loopTask.phase ? loopTask.phase : '').trim().toLowerCase();
+      const subtask = String(loopTask && loopTask.currentSubtask ? loopTask.currentSubtask : '').trim().toLowerCase();
+      return (
+        phase === 'paused'
+        && (
+          subtask === 'paused'
+          || subtask === 'waiting-bridge'
+          || String(closedLoopContinueState.lastReason || '').includes('bridge-offline')
+        )
+      );
+    }
+
+    function maybePauseClosedLoopForBridgeOffline(triggerReason = 'bridge-poll') {
+      if (!closedLoopContinueState.running) {
+        return false;
+      }
+      const runtime = typeof readToolboxRuntimeEvidence === 'function'
+        ? readToolboxRuntimeEvidence(`bridge-offline-check:${triggerReason}`)
+        : null;
+      const pageOffline = typeof isToolboxPageBridgeOffline === 'function'
+        ? isToolboxPageBridgeOffline(runtime)
+        : false;
+      if (!pageOffline) {
+        if (isClosedLoopBridgeOfflinePauseActive()) {
+          const runId = closedLoopContinueState.runId;
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][BRIDGE_ONLINE_RESUME] reason=${triggerReason} runId=${runId} round=${closedLoopContinueState.round}`,
+          );
+          closedLoopContinueState.lastReason = `bridge-online-resume:${triggerReason}`;
+          setCopyHotkeyUploadVerifyLoopPhase('running', `bridge-online-resume:${triggerReason}`, {
+            cycleIndex: closedLoopContinueState.round,
+            currentSubtask: 'resume',
+          });
+          setStatus('桥接已恢复，闭环继续运行', 'running');
+          renderClosedLoopContinueButtons();
+          scheduleClosedLoopContinueNextStep(runId, 500, `bridge-online-resume:${triggerReason}`, {
+            retryCurrentRound: true,
+          });
+        }
+        return false;
+      }
+      if (isClosedLoopBridgeOfflinePauseActive()) {
+        return true;
+      }
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][BRIDGE_OFFLINE_PAUSE] reason=${triggerReason} runId=${closedLoopContinueState.runId} `
+        + `round=${closedLoopContinueState.round} mode=${closedLoopContinueState.mode || '-'}`,
+      );
+      pauseClosedLoopContinue(`bridge-offline:${triggerReason}`, {
+        level: 'warn',
+        message: '桥接离线，闭环已暂停，等待恢复',
+        shortText: '桥接离线',
+      });
+      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
+      loopTask.currentSubtask = 'waiting-bridge';
+      return true;
+    }
+
     function pauseClosedLoopContinue(reason = 'unknown', options = {}) {
       const src = String(reason || 'unknown').trim() || 'unknown';
       const level = String(options.level || 'warn').trim() || 'warn';
       const message = String(options.message || `闭环继续暂时无法推进：${src}`);
-
+      let retryable = isClosedLoopRetryablePauseReason(src);
+      if (!retryable && src.includes('bridge-offline')) {
+        retryable = true;
+      }
       if (!closedLoopContinueState.running) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][PAUSE_SKIP] reason=${src} cause=not-running`);
         return false;
       }
-
       closedLoopContinueState.stopping = false;
       closedLoopContinueState.lastReason = src;
-
       const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
       loopTask.stopRequested = false;
       loopTask.lastError = src;
-      loopTask.currentSubtask = 'paused';
-
+      loopTask.currentSubtask = retryable ? 'paused' : 'stopped-non-retryable-pause';
+      if (!retryable) {
+        clearClosedLoopStepTimer(`non-retryable-pause:${src}`);
+        clearClosedLoopRetryTimer(`non-retryable-pause:${src}`);
+        clearClosedLoopButtonWaitState(`non-retryable-pause:${src}`);
+        if (typeof stopClosedLoopButtonTextTimer === 'function') {
+          stopClosedLoopButtonTextTimer(`non-retryable-pause:${src}`);
+        }
+        logClosedLoopStopCause(`pause-non-retryable:${src}`, options);
+        logClosedLoopRuntimeSnapshot('RUNNING_SET_FALSE', {
+          reason: `pauseClosedLoopContinue:non-retryable:${src}`,
+        });
+        closedLoopContinueState.running = false;
+        closedLoopContinueState.stopping = false;
+        closedLoopContinueState.cancelRequested = true;
+        closedLoopContinueState.cancelReason = src;
+        closedLoopContinueState.retryingCurrentRound = false;
+        closedLoopContinueState.doneVerificationRunning = false;
+        closedLoopContinueState.doneVerificationSent = false;
+        closedLoopContinueState.homeNavigationRunning = false;
+        closedLoopContinueState.waitKind = 'idle';
+        closedLoopContinueState.waitStartedAt = 0;
+        closedLoopContinueState.nextStepDelayMs = 0;
+        closedLoopContinueState.nextStepCountdownEndAt = 0;
+        state.cancelWaitingSend = true;
+        state.messageSendCancelRequested = true;
+        state.pendingSendAfterReply = false;
+        state.waitingReply = false;
+        state.messageSending = false;
+        if (typeof cancelCurrentUploadSend === 'function') {
+          cancelCurrentUploadSend(`closed-loop-non-retryable-pause:${src}`);
+        }
+        if (typeof cancelWaitingSend === 'function') {
+          cancelWaitingSend(`closed-loop-non-retryable-pause:${src}`);
+        }
+        if (typeof resetClosedLoopOwnWaitingSendState === 'function') {
+          resetClosedLoopOwnWaitingSendState(`closed-loop-non-retryable-pause:${src}`);
+        }
+        if (typeof resetCanonicalSendTaskState === 'function') {
+          resetCanonicalSendTaskState(`closed-loop-non-retryable-pause:${src}`);
+        }
+        if (typeof setAuthoritativeSendTaskState === 'function') {
+          setAuthoritativeSendTaskState(
+            {
+              phase: 'idle',
+              running: false,
+              runId: '',
+              owner: '',
+              ownerButtonId: '',
+              cancelRequested: false,
+            },
+            `closed-loop-non-retryable-pause:${src}`,
+          );
+        }
+        copyHotkeyUploadVerifyLoopRunning = false;
+        copyHotkeyUploadVerifyLoopStopRequested = false;
+        loopTask.stopRequested = false;
+        setCopyHotkeyUploadVerifyLoopPhase('stopped', `non-retryable-paused:${src}`, {
+          cycleIndex: closedLoopContinueState.round,
+          currentSubtask: 'stopped-non-retryable-pause',
+        });
+        syncToolboxRunningOwner(`non-retryable-pause:${src}`);
+        releaseUploadActionLock('copy-hotkey-upload-verify-loop');
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][NON_RETRYABLE_PAUSE_STOPPED] `
+          + `reason=${src} `
+          + `round=${closedLoopContinueState.round} `
+          + `running=${closedLoopContinueState.running ? 1 : 0} `
+          + `retryable=0`,
+        );
+        setStatus(message, level, {
+          persist: false,
+          ttlMs: 2500,
+          hideTopAlert: true,
+          hideHeaderBadge: true,
+          shortText: options.shortText || (src === 'upload-quota-exceeded' ? '上传超限' : '已暂停'),
+        });
+        renderClosedLoopContinueButtons();
+        if (typeof renderUploadButtonsOnly === 'function') {
+          renderUploadButtonsOnly(`closed-loop-non-retryable-pause:${src}`);
+        }
+        return true;
+      }
       setCopyHotkeyUploadVerifyLoopPhase('paused', `paused:${src}`, {
         cycleIndex: closedLoopContinueState.round,
         currentSubtask: 'paused',
       });
-
       ToolboxShell.appendLog(
-        `[CLOSED_LOOP][PAUSED] reason=${src} round=${closedLoopContinueState.round} retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0} retryable=${isClosedLoopRetryablePauseReason(src) ? 1 : 0}`,
+        `[CLOSED_LOOP][PAUSED] reason=${src} round=${closedLoopContinueState.round} retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0} retryable=1`,
       );
-
-      setStatus(message, level);
+      setStatus(message, level, {
+        persist: false,
+        ttlMs: 2500,
+        hideTopAlert: true,
+        hideHeaderBadge: true,
+        shortText: options.shortText || '已暂停',
+      });
       renderClosedLoopContinueButtons();
       return true;
     }
@@ -14785,10 +15392,57 @@
       );
     }
 
+    function logClosedLoopRuntimeSnapshot(tag, extra = {}) {
+      const label = String(tag || 'UNKNOWN').trim() || 'UNKNOWN';
+
+      try {
+        const task = ensureCopyHotkeyUploadVerifyLoopTask();
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][RUNTIME_SNAPSHOT][${label}] `
+          + `running=${closedLoopContinueState.running ? 1 : 0} `
+          + `stopping=${closedLoopContinueState.stopping ? 1 : 0} `
+          + `cancelRequested=${closedLoopContinueState.cancelRequested ? 1 : 0} `
+          + `cancelReason=${closedLoopContinueState.cancelReason || '-'} `
+          + `runId=${closedLoopContinueState.runId || '-'} `
+          + `round=${closedLoopContinueState.round || 0} `
+          + `mode=${closedLoopContinueState.mode || '-'} `
+          + `phase=${closedLoopContinueState.phase || '-'} `
+          + `waitKind=${closedLoopContinueState.waitKind || '-'} `
+          + `currentStepRunning=${closedLoopContinueState.currentStepRunning ? 1 : 0} `
+          + `nextStepTimer=${closedLoopContinueState.nextStepTimer ? 1 : 0} `
+          + `timerId=${closedLoopContinueState.timerId ? 1 : 0} `
+          + `retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0} `
+          + `terminalHardStopped=${closedLoopContinueState.terminalStopHardStopped ? 1 : 0} `
+          + `terminalHitCount=${closedLoopContinueState.terminalStopHitCount || 0} `
+          + `taskPhase=${task && task.phase ? task.phase : '-'} `
+          + `taskStopRequested=${task && task.stopRequested ? 1 : 0} `
+          + `extra=${JSON.stringify(extra || {})}`,
+        );
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][RUNTIME_SNAPSHOT_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][RUNTIME_SNAPSHOT_FAILED] tag=${label} error=${errText}`,
+        );
+      }
+    }
+
     function finishClosedLoopContinue(reason = 'unknown', options = {}) {
       const src = String(reason || 'unknown').trim() || 'unknown';
       const finalStatus = String(options.finalStatus || 'finished');
+      logClosedLoopRuntimeSnapshot('FINISH_ENTER', {
+        reason: src,
+        finalStatus,
+      });
       closedLoopContinueState.finishFinalStatus = finalStatus;
+      if (finalStatus === 'completed' || String(src).includes('assistant-terminal-signal-verified')) {
+        closedLoopContinueState.terminalStopHardStopped = true;
+        closedLoopContinueState.terminalStopHardStopReason = `finish:${src}`;
+        closedLoopContinueState.terminalStopLastHitAtMs = Date.now();
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_MARK_BY_FINISH] reason=${src} finalStatus=${finalStatus} hitCount=${closedLoopContinueState.terminalStopHitCount || 0}`,
+        );
+      }
 
       if (!closedLoopContinueState.running && !closedLoopContinueState.stopping) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][FINISH_SKIP] reason=${src} state=idle`);
@@ -14814,6 +15468,31 @@
       const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
       loopTask.stopRequested = true;
 
+      const runtimeForFinish = typeof readToolboxRuntimeEvidence === 'function'
+        ? readToolboxRuntimeEvidence(`finish-check:${src}`)
+        : null;
+      const pageOfflineOnFinish = typeof isToolboxPageBridgeOffline === 'function'
+        ? isToolboxPageBridgeOffline(runtimeForFinish)
+        : false;
+      if (pageOfflineOnFinish && finalStatus !== 'completed') {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][FINISH_BLOCKED_BRIDGE_OFFLINE] reason=${src} finalStatus=${finalStatus} `
+          + `runId=${closedLoopContinueState.runId} round=${closedLoopContinueState.round}`,
+        );
+        loopTask.stopRequested = false;
+        pauseClosedLoopContinue(`bridge-offline-block-finish:${src}`, {
+          level: 'warn',
+          message: '桥接离线，闭环已暂停，等待恢复',
+          shortText: '桥接离线',
+        });
+        loopTask.currentSubtask = 'waiting-bridge';
+        return false;
+      }
+
+      logClosedLoopStopCause(`finish:${src}`, { finalStatus });
+      logClosedLoopRuntimeSnapshot('RUNNING_SET_FALSE', {
+        reason: `finishClosedLoopContinue:${src}`,
+      });
       closedLoopContinueState.running = false;
       closedLoopContinueState.stopping = false;
       closedLoopContinueState.doneVerificationRunning = false;
@@ -14846,6 +15525,10 @@
       }, 1200);
 
       ToolboxShell.appendLog(`[CLOSED_LOOP][FINISH_DONE] reason=${src} finalStatus=${finalStatus}`);
+      logClosedLoopRuntimeSnapshot('FINISH_DONE', {
+        reason: src,
+        finalStatus,
+      });
       ToolboxShell.appendLog(
         `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][done] reason=${src} cycles=${closedLoopContinueState.round}`,
       );
@@ -14853,14 +15536,186 @@
       return true;
     }
 
+    function shouldClosedLoopKeepRunningForNextRound(reason = '') {
+      if (!closedLoopContinueState || closedLoopContinueState.running !== true) {
+        return false;
+      }
+
+      if (closedLoopContinueState.stopping || closedLoopContinueState.cancelRequested) {
+        return false;
+      }
+
+      if (closedLoopContinueState.terminalStopHardStopped) {
+        return false;
+      }
+
+      const mode = String(closedLoopContinueState.mode || '').trim();
+      if (
+        mode !== CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY
+        && mode !== CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND
+        && mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY
+      ) {
+        return false;
+      }
+
+      const task = ensureCopyHotkeyUploadVerifyLoopTask();
+      if (task && task.stopRequested) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function ensureClosedLoopNextRoundScheduled(reason = 'unknown', options = {}) {
+      const src = String(reason || 'unknown').trim() || 'unknown';
+
+      if (!shouldClosedLoopKeepRunningForNextRound(src)) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][CONTINUOUS_GUARD_SKIP] `
+          + `reason=${src} `
+          + `running=${closedLoopContinueState.running ? 1 : 0} `
+          + `stopping=${closedLoopContinueState.stopping ? 1 : 0} `
+          + `cancelRequested=${closedLoopContinueState.cancelRequested ? 1 : 0} `
+          + `terminalHardStopped=${closedLoopContinueState.terminalStopHardStopped ? 1 : 0} `
+          + `mode=${closedLoopContinueState.mode || '-'}`,
+        );
+        return false;
+      }
+
+      if (
+        closedLoopContinueState.currentStepRunning
+        || closedLoopContinueState.nextStepTimer
+        || closedLoopContinueState.timerId
+        || closedLoopContinueState.retryTimerId
+      ) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][CONTINUOUS_GUARD_KEEP] `
+          + `reason=${src} `
+          + `currentStepRunning=${closedLoopContinueState.currentStepRunning ? 1 : 0} `
+          + `nextStepTimer=${closedLoopContinueState.nextStepTimer ? 1 : 0} `
+          + `timerId=${closedLoopContinueState.timerId ? 1 : 0} `
+          + `retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0}`,
+        );
+        return true;
+      }
+
+      const runId = closedLoopContinueState.runId;
+      const currentRound = Math.max(0, Number(closedLoopContinueState.round || 0));
+      const waitKind = String(closedLoopContinueState.waitKind || '').trim();
+      const phaseText = String(closedLoopContinueState.phase || '').trim();
+
+      const authority = getToolboxAuthorityState(`continuous-guard:${src}`, {
+        force: true,
+      });
+
+      const replyReady = !!(
+        authority
+        && authority.reply
+        && authority.reply.state === TOOLBOX_REPLY_STATES.READY
+        && authority.composer
+        && !authority.composer.hasRealStopButton
+      );
+
+      const replyBusy = !!(
+        authority
+        && authority.reply
+        && authority.reply.busy === true
+      );
+
+      if (replyBusy) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][CONTINUOUS_GUARD_WAIT_REPLY_BUSY] `
+          + `reason=${src} `
+          + `runId=${runId || '-'} `
+          + `round=${currentRound || 0} `
+          + `phase=${phaseText || '-'} `
+          + `waitKind=${waitKind || '-'}`,
+        );
+        beginClosedLoopReplyWait(`continuous-guard:${src}`);
+        recoverClosedLoopContinue(runId, `continuous-guard-wait-reply:${src}`, {
+          delayMs: 3000,
+          retryCurrentRound: false,
+          skipHomeNavigation: true,
+          forceRetry: true,
+        });
+        return true;
+      }
+
+      if (!replyReady) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][CONTINUOUS_GUARD_NOT_READY] `
+          + `reason=${src} `
+          + `runId=${runId || '-'} `
+          + `round=${currentRound || 0} `
+          + `phase=${phaseText || '-'} `
+          + `waitKind=${waitKind || '-'} `
+          + `replyState=${authority && authority.reply ? authority.reply.state : '-'} `
+          + `stop=${authority && authority.composer && authority.composer.hasRealStopButton ? 1 : 0}`,
+        );
+        recoverClosedLoopContinue(runId, `continuous-guard-not-ready:${src}`, {
+          delayMs: 3000,
+          retryCurrentRound: false,
+          skipHomeNavigation: true,
+          forceRetry: true,
+        });
+        return true;
+      }
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][CONTINUOUS_GUARD_FORCE_NEXT] `
+        + `reason=${src} `
+        + `runId=${runId || '-'} `
+        + `round=${currentRound || 0} `
+        + `phase=${phaseText || '-'} `
+        + `waitKind=${waitKind || '-'} `
+        + `action=schedule-next-step`,
+      );
+
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.NEXT_ROUND || 'next_round', {
+        reason: `continuous-guard:${src}`,
+      });
+      closedLoopContinueState.waitKind = 'next-round-ready';
+      closedLoopContinueState.nextStepScheduledAtMs = Date.now();
+      closedLoopContinueState.nextStepScheduledReason = `continuous-guard:${src}`;
+      closedLoopContinueState.nextStepScheduledRound = Math.max(1, currentRound + 1);
+
+      const scheduled = scheduleClosedLoopContinueNextStep(
+        runId,
+        Number(options.delayMs || 0) || 0,
+        `continuous-guard:${src}`,
+        {
+          skipHomeNavigation: true,
+          retryCurrentRound: false,
+          forceRetry: true,
+        },
+      );
+
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][CONTINUOUS_GUARD_FORCE_NEXT_RESULT] `
+        + `reason=${src} `
+        + `runId=${runId || '-'} `
+        + `round=${currentRound || 0} `
+        + `scheduled=${scheduled ? 1 : 0}`,
+      );
+
+      return !!scheduled;
+    }
+
     function stopClosedLoopContinue(reason = 'manual-stop') {
       const src = String(reason || 'manual-stop').trim() || 'manual-stop';
       const oldRunId = closedLoopContinueState.runId || 0;
+      logClosedLoopRuntimeSnapshot('STOP_ENTER', {
+        reason: src,
+      });
 
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][STOP_REQUEST] reason=${src} runningBefore=${closedLoopContinueState.running ? 1 : 0} runId=${oldRunId} mode=${closedLoopContinueState.mode || '-'}`,
       );
 
+      logClosedLoopStopCause(`stop:${src}`, { oldRunId });
+      logClosedLoopRuntimeSnapshot('RUNNING_SET_FALSE', {
+        reason: `stopClosedLoopContinue:${src}`,
+      });
       closedLoopContinueState.running = false;
       closedLoopContinueState.stopping = false;
       closedLoopContinueState.cancelRequested = true;
@@ -14953,6 +15808,9 @@
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][STOP_DONE] reason=${src} runningAfter=${closedLoopContinueState.running ? 1 : 0} oldRunId=${oldRunId} newRunId=${closedLoopContinueState.runId || '-'}`,
       );
+      logClosedLoopRuntimeSnapshot('STOP_DONE', {
+        reason: src,
+      });
       ToolboxShell.appendLog(`[CLOSED_LOOP][USER_STOP] reason=${src}`);
 
       return true;
@@ -16510,6 +17368,10 @@
         `[CLOSED_LOOP][STALE_RUNNING_REPAIR] reason=${src} `
         + `taskPhase=${taskPhase || '-'} hasTimer=${hasTimer ? 1 : 0} hasBusyRuntime=${hasBusyRuntime ? 1 : 0}`,
       );
+      logClosedLoopStopCause(`stale-running-repair:${src}`, {});
+      logClosedLoopRuntimeSnapshot('RUNNING_SET_FALSE', {
+        reason: `repairStaleClosedLoopRunningState:${src}`,
+      });
       closedLoopContinueState.running = false;
       closedLoopContinueState.stopping = false;
       stopClosedLoopButtonTextTimer(`stale-running-repair:${src}`);
@@ -16741,6 +17603,7 @@
         return false;
       }
       setClosedLoopStartPending(normalizedMode, `${source}:after-first-turn-send`);
+      persistClosedLoopStartPending(`before-first-turn-native-click:${source || '-'}`);
       invalidateRealSendButtonCache('before-closed-loop-first-turn-send');
       const firstTurnSendBtn = findSendButton({
         reason: 'closed-loop-send:user-click',
@@ -16769,6 +17632,7 @@
       }));
       firstTurnSendBtn.click();
       invalidateRealSendButtonCache('after-closed-loop-first-turn-send');
+      persistClosedLoopStartPending(`after-first-turn-native-click:${source || '-'}`);
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][FIRST_TURN_SENT] mode=${normalizedMode || '-'} source=${source || '-'} textLen=${firstTurn.composerTextLen} readyAttachment=${firstTurn.readyAttachmentCount}`,
       );
@@ -16978,6 +17842,22 @@
         return;
       }
 
+      const preflight = await preflightClosedLoopComposerState('start');
+      if (!preflight.ok) {
+        console.warn('[CLOSED_LOOP][START_BLOCKED]', 'reason=' + preflight.reason, 'message=' + preflight.message);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][START_BLOCKED] reason=${preflight.reason} message=${preflight.message}`,
+        );
+        releaseUploadActionLock('copy-hotkey-upload-verify-loop');
+        setStatus(preflight.message, 'warn', {
+          persist: false,
+          ttlMs: 4000,
+          shortText: '附件检测异常',
+        });
+        renderClosedLoopContinueButtons();
+        return;
+      }
+
       resetClosedLoopStartCancelFlags(`closed-loop-start:${src}`);
 
       closedLoopContinueState.running = true;
@@ -16995,6 +17875,16 @@
       closedLoopContinueState.doneVerificationRunning = false;
       closedLoopContinueState.doneVerificationSent = false;
       closedLoopContinueState.doneVerificationRound = 0;
+      closedLoopContinueState.terminalStopHitCount = 0;
+      closedLoopContinueState.terminalStopFirstHitAtMs = 0;
+      closedLoopContinueState.terminalStopLastHitAtMs = 0;
+      closedLoopContinueState.terminalStopLastRound = 0;
+      closedLoopContinueState.terminalStopHardStopped = false;
+      closedLoopContinueState.terminalStopHardStopReason = '';
+      closedLoopContinueState.terminalStopLastSignal = '';
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][TERMINAL_STOP_STATE_RESET] reason=start runId=${closedLoopContinueState.runId || '-'} mode=${mode || '-'}`,
+      );
       closedLoopContinueState.homeNavigationRunning = false;
       closedLoopContinueState.lastHomeNavigationRound = 0;
       closedLoopContinueState.sendFailedStreak = 0;
@@ -17089,6 +17979,14 @@
     }
 
     async function runClosedLoopDoneVerification(runId, round, triggerReason = 'done-signal', expectedStatus = 'done') {
+      if (maybeHardStopClosedLoopByTerminalCount('done-verification-entry', round)) {
+        return {
+          ok: true,
+          reason: 'terminal-hard-stop-before-verification',
+          status: expectedStatus || 'done',
+          hardStopped: true,
+        };
+      }
       if (!isClosedLoopRunActive(runId)) {
         ToolboxShell.appendLog(`[CLOSED_LOOP][DONE_VERIFY_SKIP] reason=inactive runId=${runId} round=${round}`);
         return {
@@ -17124,49 +18022,27 @@
       );
 
       try {
-        setCopyHotkeyUploadVerifyLoopPhase('auto_uploading', `done-verify-upload-${round}`, {
+        setCopyHotkeyUploadVerifyLoopPhase('sending_continue', `done-verify-no-upload-${round}`, {
           cycleIndex: round,
-          currentSubtask: 'done_verify_upload',
+          currentSubtask: 'done_verify_no_upload',
         });
         renderClosedLoopContinueButton();
-
         ToolboxShell.appendLog(
-          `[CLOSED_LOOP][DONE_VERIFY_UPLOAD_START] runId=${runId} round=${round}`,
+          [
+            '[CLOSED_LOOP][DONE_VERIFY_UPLOAD_SKIPPED]',
+            `runId=${runId}`,
+            `round=${round}`,
+            `trigger=${triggerReason || '-'}`,
+            'reason=terminal-signal-verification-must-not-upload-files',
+            'action=text-only-verification',
+          ].join(' '),
         );
-
-        const useHotkeyForVerify = closedLoopContinueState.mode !== CLOSED_LOOP_CONTINUE_MODES.WITHOUT_HOTKEY;
-        const verifyUploadSource = useHotkeyForVerify
-          ? 'closed-loop-hotkey-final-verify-upload'
-          : 'closed-loop-final-verify-upload';
-
-        const uploadResult = await runStartUploadButtonCore({
-          source: verifyUploadSource,
-          reason: 'closed-loop-done-verification',
-          parentTask: 'closedLoopDoneVerification',
-          cycleIndex: round,
-          shouldStop,
-        });
-
-        ToolboxShell.appendLog(
-          `[CLOSED_LOOP][DONE_VERIFY_UPLOAD_DONE] runId=${runId} round=${round} ok=${uploadResult && uploadResult.ok ? 1 : 0} uploaded=${uploadResult && uploadResult.uploadedCount != null ? uploadResult.uploadedCount : '-'} failed=${uploadResult && uploadResult.failedCount != null ? uploadResult.failedCount : '-'} skipped=${uploadResult && uploadResult.skippedCount != null ? uploadResult.skippedCount : '-'} reason=${uploadResult && uploadResult.reason ? uploadResult.reason : '-'}`,
-        );
-
-        if (!uploadResult || uploadResult.ok !== true) {
-          const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown';
-          ToolboxShell.appendLog(
-            `[CLOSED_LOOP][UPLOAD_FAILED] source=${verifyUploadSource} runId=${runId} round=${round} reason=${reason}`,
-          );
-          setStatus(`闭环上传失败：${reason}`, 'error');
+        if (maybeHardStopClosedLoopByTerminalCount('done-verification-before-send', round)) {
           return {
-            ok: false,
-            reason: `upload-failed:${reason}`,
-          };
-        }
-
-        if (!isClosedLoopRunActive(runId)) {
-          return {
-            ok: false,
-            reason: 'inactive-after-upload',
+            ok: true,
+            reason: 'terminal-hard-stop-before-verification-send',
+            status: expectedStatus || 'done',
+            hardStopped: true,
           };
         }
 
@@ -17268,6 +18144,22 @@
 
         const verifyStopSignal = detectCopyHotkeyLoopStopSignal(round);
         const matched = !!(verifyStopSignal && verifyStopSignal.matched);
+        if (matched) {
+          recordClosedLoopTerminalStopHit(
+            verifyStopSignal,
+            round,
+            'done-verification-reply',
+          );
+        }
+        if (maybeHardStopClosedLoopByTerminalCount('done-verification-reply-check', round)) {
+          verifySucceeded = true;
+          return {
+            ok: true,
+            reason: 'terminal-hard-stop-after-verification-reply',
+            status: verifyStopSignal && verifyStopSignal.status ? verifyStopSignal.status : 'done',
+            hardStopped: true,
+          };
+        }
         const verifyStatus = verifyStopSignal && verifyStopSignal.status
           ? String(verifyStopSignal.status)
           : 'continue';
@@ -17324,7 +18216,108 @@
 
       const uploadEveryRound = options.uploadEveryRound === true
         || isClosedLoopEveryRoundUploadMode(options.mode || closedLoopContinueState.mode);
-      const forceReupload = uploadEveryRound || options.forceReupload === true;
+      const retryCurrentRound = options.retryCurrentRound === true
+        || closedLoopContinueState.retryingCurrentRound === true;
+      const sharedUploadQuotaState = getUploadQuotaState({
+        logSnapshot: true,
+      });
+      const sharedUploadQuotaExceeded = !!(
+        sharedUploadQuotaState
+        && Number(sharedUploadQuotaState.used || 0) >= Number(
+          sharedUploadQuotaState.maxFiles
+          || sharedUploadQuotaState.limit
+          || 80
+        )
+      );
+      if (sharedUploadQuotaExceeded) {
+        const composerSnapshotForSharedQuota = options.composerSnapshotBeforeUpload
+          && typeof options.composerSnapshotBeforeUpload === 'object'
+            ? options.composerSnapshotBeforeUpload
+            : readClosedLoopComposerUploadPayloadSnapshot(
+              `shared-upload-quota-block:run-${runId}:round-${round}`,
+            );
+        if (composerSnapshotForSharedQuota.hasUploadPayload) {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][SHARED_UPLOAD_SKIP_QUOTA_EXCEEDED_COMPOSER_HAS_PAYLOAD]',
+              `runId=${runId || '-'}`,
+              `round=${round || '-'}`,
+              `used=${sharedUploadQuotaState.used}`,
+              `limit=${sharedUploadQuotaState.maxFiles || sharedUploadQuotaState.limit}`,
+              `attachmentCount=${composerSnapshotForSharedQuota.attachmentCount}`,
+              `uploadingCount=${composerSnapshotForSharedQuota.uploadingCount}`,
+              'action=send-existing-composer-payload',
+            ].join(' '),
+          );
+          return {
+            ok: true,
+            skipped: true,
+            reason: 'upload-quota-exceeded-but-composer-already-has-payload',
+            uploadedCount: 0,
+            failedCount: 0,
+            skippedCount: 0,
+          };
+        }
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][SHARED_UPLOAD_BLOCKED_BY_QUOTA]',
+            `runId=${runId || '-'}`,
+            `round=${round || '-'}`,
+            `used=${sharedUploadQuotaState.used}`,
+            `limit=${sharedUploadQuotaState.maxFiles || sharedUploadQuotaState.limit}`,
+            `remaining=${sharedUploadQuotaState.remaining}`,
+            'action=return-failed',
+          ].join(' '),
+        );
+        return {
+          ok: false,
+          reason: `upload-quota-exceeded:${sharedUploadQuotaState.used}/${sharedUploadQuotaState.maxFiles || sharedUploadQuotaState.limit}`,
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+      const composerSnapshotBeforeUpload = options.composerSnapshotBeforeUpload
+        && typeof options.composerSnapshotBeforeUpload === 'object'
+          ? options.composerSnapshotBeforeUpload
+          : readClosedLoopComposerUploadPayloadSnapshot(
+            `shared-upload-entry:run-${runId}:round-${round}:retry-${retryCurrentRound ? 1 : 0}`,
+          );
+      if (
+        composerSnapshotBeforeUpload.hasUploadPayload
+        && composerSnapshotBeforeUpload.uploadingCount <= 0
+        && (
+          retryCurrentRound
+          || uploadEveryRound
+        )
+      ) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][SHARED_UPLOAD_SKIP_COMPOSER_ALREADY_HAS_PAYLOAD]',
+            `runId=${runId || '-'}`,
+            `round=${round || '-'}`,
+            `retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
+            `uploadEveryRound=${uploadEveryRound ? 1 : 0}`,
+            `attachmentCount=${composerSnapshotBeforeUpload.attachmentCount}`,
+            `readyCount=${composerSnapshotBeforeUpload.readyCount}`,
+            `uploadingCount=${composerSnapshotBeforeUpload.uploadingCount}`,
+            `textLen=${composerSnapshotBeforeUpload.textLen}`,
+            'action=send-existing-composer-payload',
+          ].join(' '),
+        );
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'composer-already-has-upload-payload-before-closed-loop-upload',
+          uploadedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+        };
+      }
+      const forceReupload = !retryCurrentRound && (
+        uploadEveryRound
+        || options.forceReupload === true
+      );
       const source = useHotkey
         ? (
           round === 1
@@ -17407,13 +18400,293 @@
       runId: null,
       lastUploadRound: 0,
       lastUploadReason: '',
+      inFlightRunId: null,
+      inFlightRound: 0,
+      inFlightStartedAtMs: 0,
     };
 
-    function shouldSkipDuplicateClosedLoopUpload(runId, round) {
+    function readClosedLoopComposerUploadPayloadSnapshot(source = 'unknown') {
+      const src = String(source || 'unknown').trim() || 'unknown';
+      const snapshot = {
+        source: src,
+        hasUploadPayload: false,
+        attachmentCount: 0,
+        readyCount: 0,
+        uploadingCount: 0,
+        textLen: 0,
+        method: 'none',
+      };
+      try {
+        if (typeof getComposerUploadPayloadSnapshot === 'function') {
+          const s = getComposerUploadPayloadSnapshot(`closed-loop-dedup:${src}`) || {};
+          snapshot.attachmentCount = Math.max(
+            0,
+            Number(
+              s.normalizedCount != null ? s.normalizedCount
+                : s.totalCount != null ? s.totalCount
+                  : s.rawCount != null ? s.rawCount
+                    : 0,
+            ) || 0,
+          );
+          snapshot.readyCount = Math.max(0, Number(s.readyCount || 0) || 0);
+          snapshot.uploadingCount = Math.max(0, Number(s.uploadingCount || 0) || 0);
+          snapshot.method = s.method || 'getComposerUploadPayloadSnapshot';
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][COMPOSER_UPLOAD_SNAPSHOT_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][COMPOSER_UPLOAD_SNAPSHOT_FAILED] source=${src} error=${errText}`,
+        );
+      }
+      if (snapshot.attachmentCount <= 0) {
+        try {
+          if (typeof getComposerAttachmentState === 'function') {
+            const reconciled = getComposerAttachmentState({
+              reason: `closed-loop-upload-payload:${src}`,
+              heavy: true,
+              domScan: true,
+            }) || {};
+            const summarized = typeof summarizeComposerStateForUploadHeal === 'function'
+              ? summarizeComposerStateForUploadHeal(reconciled)
+              : {
+                composerCount: 0,
+                composerUploading: false,
+                composerReady: false,
+              };
+            const reconciledCount = Math.max(
+              0,
+              Number(summarized.composerCount || 0) || 0,
+              Number(reconciled.normalizedCount || 0) || 0,
+              Number(reconciled.count || 0) || 0,
+              Number(reconciled.fileCount || 0) || 0,
+              Number(reconciled.attachmentCount || 0) || 0,
+              Number(reconciled.uniqueCount || 0) || 0,
+              Number(reconciled.totalCount || 0) || 0,
+              Number(reconciled.rawCount || 0) || 0,
+            );
+            const reconciledUploading = !!(
+              summarized.composerUploading
+              || Number(reconciled.uploadingCount || 0) > 0
+              || Number(reconciled.uploading || 0) > 0
+              || reconciled.attachmentUploading === true
+              || reconciled.isUploading === true
+            );
+            const reconciledReady = !!(
+              summarized.composerReady
+              || Number(reconciled.readyCount || 0) > 0
+              || reconciled.hasReady === true
+              || (
+                reconciledCount > 0
+                && reconciledUploading !== true
+              )
+            );
+            if (reconciledCount > 0 || reconciledReady || reconciledUploading) {
+              snapshot.attachmentCount = Math.max(snapshot.attachmentCount, reconciledCount);
+              snapshot.readyCount = Math.max(
+                snapshot.readyCount,
+                reconciledReady ? Math.max(1, Number(reconciled.readyCount || 0) || 0, reconciledCount) : 0,
+              );
+              snapshot.uploadingCount = Math.max(
+                snapshot.uploadingCount,
+                reconciledUploading ? Math.max(1, Number(reconciled.uploadingCount || 0) || 0) : 0,
+              );
+              snapshot.method = snapshot.method === 'none'
+                ? 'getComposerAttachmentState:reconciled'
+                : `${snapshot.method}+getComposerAttachmentState:reconciled`;
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][COMPOSER_UPLOAD_PAYLOAD_RECONCILED] `
+                + `source=${src} `
+                + `attachmentCount=${snapshot.attachmentCount} `
+                + `readyCount=${snapshot.readyCount} `
+                + `uploadingCount=${snapshot.uploadingCount} `
+                + `unifiedSource=${reconciled._unified_source || '-'} `
+                + `method=${snapshot.method || '-'}`,
+              );
+            }
+          }
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CLOSED_LOOP][COMPOSER_UPLOAD_RECONCILE_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][COMPOSER_UPLOAD_RECONCILE_FAILED] source=${src} error=${errText}`,
+          );
+        }
+      }
+      if (snapshot.attachmentCount <= 0) {
+        try {
+          if (typeof detectComposerHasUploadPayload === 'function' && detectComposerHasUploadPayload()) {
+            snapshot.attachmentCount = 1;
+            snapshot.readyCount = Math.max(snapshot.readyCount, 1);
+            snapshot.method = snapshot.method === 'none'
+              ? 'detectComposerHasUploadPayload'
+              : `${snapshot.method}+detectComposerHasUploadPayload`;
+          }
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CLOSED_LOOP][COMPOSER_UPLOAD_DETECT_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][COMPOSER_UPLOAD_DETECT_FAILED] source=${src} error=${errText}`,
+          );
+        }
+      }
+      try {
+        let composerText = '';
+        if (typeof getSharedComposerTextTrimmed === 'function') {
+          composerText = String(getSharedComposerTextTrimmed() || '').trim();
+        } else if (typeof readComposerTextFallback === 'function') {
+          composerText = String(readComposerTextFallback() || '').trim();
+        }
+        snapshot.textLen = composerText.length;
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][COMPOSER_TEXT_SNAPSHOT_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][COMPOSER_TEXT_SNAPSHOT_FAILED] source=${src} error=${errText}`,
+        );
+      }
+      snapshot.hasUploadPayload = snapshot.attachmentCount > 0
+        || snapshot.readyCount > 0
+        || snapshot.uploadingCount > 0;
+      if (
+        snapshot.hasUploadPayload
+        && snapshot.uploadingCount <= 0
+        && String(snapshot.method || '').includes('dom-remove-file')
+      ) {
+        try {
+          const realSendButton = typeof findChatGPTSendButton === 'function'
+            ? findChatGPTSendButton({ silent: true })
+            : null;
+          const hasRealSendButton = !!realSendButton;
+          if (!hasRealSendButton) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][COMPOSER_UPLOAD_PAYLOAD_DOM_ONLY_WITHOUT_SEND_BUTTON] `
+              + `source=${src} `
+              + `attachmentCount=${snapshot.attachmentCount} `
+              + `readyCount=${snapshot.readyCount} `
+              + `uploadingCount=${snapshot.uploadingCount} `
+              + `method=${snapshot.method || '-'} `
+              + `action=reset-dom-only-payload`,
+            );
+            snapshot.hasUploadPayload = false;
+            snapshot.attachmentCount = 0;
+            snapshot.readyCount = 0;
+            snapshot.method = `${snapshot.method || 'unknown'}+reset-dom-only-no-send-button`;
+          }
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CLOSED_LOOP][DOM_ONLY_PAYLOAD_SEND_BUTTON_CHECK_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][DOM_ONLY_PAYLOAD_SEND_BUTTON_CHECK_FAILED] source=${src} error=${errText}`,
+          );
+        }
+      }
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][COMPOSER_UPLOAD_PAYLOAD_SNAPSHOT]',
+          `source=${src}`,
+          `hasUploadPayload=${snapshot.hasUploadPayload ? 1 : 0}`,
+          `attachmentCount=${snapshot.attachmentCount}`,
+          `readyCount=${snapshot.readyCount}`,
+          `uploadingCount=${snapshot.uploadingCount}`,
+          `textLen=${snapshot.textLen}`,
+          `method=${snapshot.method || '-'}`,
+        ].join(' '),
+      );
+      return snapshot;
+    }
+
+    function isClosedLoopUploadInFlightForRound(runId, round) {
       return (
+        closedLoopUploadDedupState.inFlightRunId === runId
+        && closedLoopUploadDedupState.inFlightRound === round
+      );
+    }
+
+    function markClosedLoopUploadInFlight(runId, round, reason = 'unknown') {
+      closedLoopUploadDedupState.inFlightRunId = runId;
+      closedLoopUploadDedupState.inFlightRound = round;
+      closedLoopUploadDedupState.inFlightStartedAtMs = Date.now();
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][UPLOAD_DEDUP_INFLIGHT_MARK] runId=${runId || '-'} round=${round || '-'} reason=${reason || '-'}`,
+      );
+    }
+
+    function clearClosedLoopUploadInFlight(runId, round, reason = 'unknown') {
+      if (
+        closedLoopUploadDedupState.inFlightRunId === runId
+        && closedLoopUploadDedupState.inFlightRound === round
+      ) {
+        closedLoopUploadDedupState.inFlightRunId = null;
+        closedLoopUploadDedupState.inFlightRound = 0;
+        closedLoopUploadDedupState.inFlightStartedAtMs = 0;
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][UPLOAD_DEDUP_INFLIGHT_CLEAR] runId=${runId || '-'} round=${round || '-'} reason=${reason || '-'}`,
+        );
+      }
+    }
+
+    function markClosedLoopUploadDoneForRound(runId, round, reason = 'unknown') {
+      closedLoopUploadDedupState.runId = runId;
+      closedLoopUploadDedupState.lastUploadRound = round;
+      closedLoopUploadDedupState.lastUploadReason = reason || '';
+      clearClosedLoopUploadInFlight(runId, round, `done:${reason || '-'}`);
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][UPLOAD_DEDUP_DONE_MARK] runId=${runId || '-'} round=${round || '-'} reason=${reason || '-'}`,
+      );
+    }
+
+    function shouldSkipDuplicateClosedLoopUpload(runId, round, options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const source = String(opts.source || 'unknown').trim() || 'unknown';
+      const sameRoundUploaded = (
         closedLoopUploadDedupState.runId === runId
         && closedLoopUploadDedupState.lastUploadRound === round
       );
+      const sameRoundUploading = isClosedLoopUploadInFlightForRound(runId, round);
+      if (sameRoundUploaded || sameRoundUploading) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][UPLOAD_SKIP_DUPLICATE_ROUND_STATE]',
+            `runId=${runId || '-'}`,
+            `round=${round || '-'}`,
+            `source=${source}`,
+            `sameRoundUploaded=${sameRoundUploaded ? 1 : 0}`,
+            `sameRoundUploading=${sameRoundUploading ? 1 : 0}`,
+            `lastReason=${closedLoopUploadDedupState.lastUploadReason || '-'}`,
+          ].join(' '),
+        );
+        return true;
+      }
+      const composerSnapshot = opts.composerSnapshot && typeof opts.composerSnapshot === 'object'
+        ? opts.composerSnapshot
+        : readClosedLoopComposerUploadPayloadSnapshot(`skip-duplicate-check:${source}:round-${round}`);
+      const retryCurrentRound = opts.retryCurrentRound === true
+        || closedLoopContinueState.retryingCurrentRound === true;
+      if (
+        composerSnapshot.hasUploadPayload
+        && (
+          retryCurrentRound
+          || opts.blockWhenComposerHasPayload === true
+        )
+      ) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][UPLOAD_SKIP_COMPOSER_ALREADY_HAS_PAYLOAD]',
+            `runId=${runId || '-'}`,
+            `round=${round || '-'}`,
+            `source=${source}`,
+            `retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
+            `attachmentCount=${composerSnapshot.attachmentCount}`,
+            `readyCount=${composerSnapshot.readyCount}`,
+            `uploadingCount=${composerSnapshot.uploadingCount}`,
+            `textLen=${composerSnapshot.textLen}`,
+            'action=send-existing-composer-payload',
+          ].join(' '),
+        );
+        return true;
+      }
+      return false;
     }
 
     function isClosedLoopSendCoreFalseNegativeReason(reason) {
@@ -17741,11 +19014,35 @@
           'reason=defer-until-current-step-exits',
         ].join(' '),
       );
-      scheduleClosedLoopContinueNextStep(runId, 0, 'post-hotkey-delay-done:deferred-next-step', {
+      const scheduled = scheduleClosedLoopContinueNextStep(runId, 0, 'post-hotkey-delay-done:deferred-next-step', {
         skipHomeNavigation: true,
         skipCopyHotkeyForCurrentRound: false,
         retryCurrentRound: false,
       });
+      ToolboxShell.appendLog(
+        `[CLOSED_LOOP][NEXT_ROUND_STEP_SCHEDULE_CALL_RESULT] `
+        + `runId=${runId || '-'} `
+        + `previousRound=${previousRound || 0} `
+        + `nextRound=${nextRound || 0} `
+        + `scheduled=${scheduled ? 1 : 0}`,
+      );
+      if (!scheduled) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][NEXT_ROUND_SCHEDULE_FAILED_FORCE_GUARD] `
+          + `runId=${runId || '-'} `
+          + `previousRound=${previousRound || 0} `
+          + `nextRound=${nextRound || 0} `
+          + `action=ensure-continuous-progress`,
+        );
+        ensureClosedLoopNextRoundScheduled('next-round-schedule-call-failed', {
+          delayMs: 500,
+        });
+        return {
+          ok: false,
+          scheduled: false,
+          reason: 'next-step-schedule-call-failed-guarded',
+        };
+      }
       return {
         ok: true,
         scheduled: true,
@@ -17757,6 +19054,12 @@
       if (shouldStopClosedLoopRun(runId)) {
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][ABORT_BY_STOP] runId=${runId} currentRunId=${closedLoopContinueState.runId || '-'} reason=${closedLoopContinueState.cancelReason || '-'} stage=before-step`,
+        );
+        return;
+      }
+      if (maybeHardStopClosedLoopByTerminalCount('step-entry', closedLoopContinueState.round)) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][STEP_ABORT_TERMINAL_HARD_STOP] stage=entry runId=${runId || '-'} round=${closedLoopContinueState.round || '-'}`,
         );
         return;
       }
@@ -17888,6 +19191,24 @@
         closedLoopContinueState.retryAttempts = 0;
       }
       syncClosedLoopRound(round, retryCurrentRound ? 'retry-current-round' : 'step-advance');
+
+      const stepPreflight = await preflightClosedLoopComposerState(`step-round-${round}`);
+      if (!stepPreflight.ok) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][STEP_PREFLIGHT_BLOCK] runId=${runId} round=${round} reason=${stepPreflight.reason}`,
+        );
+        pauseClosedLoopContinue(stepPreflight.reason, {
+          level: 'warn',
+          message: stepPreflight.message,
+          shortText: '附件检测异常',
+        });
+        return;
+      }
+
+      if (maybePauseClosedLoopForBridgeOffline(`step-round-${round}`)) {
+        return;
+      }
+
       setClosedLoopPhase(CLOSED_LOOP_PHASES.SENDING, {
         reason: `round-${round}-send-start`,
       });
@@ -17904,10 +19225,35 @@
       ).action;
 
       const skipHomeNavigation = options && options.skipHomeNavigation === true;
+      const pageDialogueSnapshotForHome = readClosedLoopCurrentPageDialogueCount(
+        `closed-loop-step-before-home-check:run-${runId}:round-${round}`,
+      );
+
       const homeCheck = shouldRunUnifiedContinueHomeNavigation(
         round,
         closedLoopHomeSource,
+        {
+          dialogueSnapshot: pageDialogueSnapshotForHome,
+          runId,
+          source: options.source || '-',
+        },
       );
+
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][HOME_NAV_PRECHECK]',
+          `runId=${runId || '-'}`,
+          `round=${round || '-'}`,
+          `mode=${closedLoopContinueState.mode || '-'}`,
+          `action=${closedLoopHomeSource || '-'}`,
+          `ok=${homeCheck && homeCheck.ok ? 1 : 0}`,
+          `reason=${homeCheck && homeCheck.reason ? homeCheck.reason : '-'}`,
+          `pageDialogueCount=${pageDialogueSnapshotForHome.count}`,
+          `dialogueSource=${pageDialogueSnapshotForHome.source}`,
+          `threshold=${homeCheck && homeCheck.threshold ? homeCheck.threshold : '-'}`,
+        ].join(' '),
+      );
+
       if (
         homeCheck.ok
         && !skipHomeNavigation
@@ -17969,6 +19315,37 @@
       const activeGroupHasUploadableFiles = hasActiveScopeUploadableFiles({
         groupId: activeUploadGroupId,
       });
+      const uploadQuotaStateForClosedLoop = getUploadQuotaState({
+        logSnapshot: true,
+      });
+      const uploadQuotaExceededForClosedLoop = !!(
+        uploadQuotaStateForClosedLoop
+        && Number(uploadQuotaStateForClosedLoop.used || 0) >= Number(
+          uploadQuotaStateForClosedLoop.maxFiles
+          || uploadQuotaStateForClosedLoop.limit
+          || 80
+        )
+      );
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][UPLOAD_QUOTA_GUARD]',
+          `runId=${runId || '-'}`,
+          `round=${round || '-'}`,
+          `mode=${closedLoopContinueState.mode || '-'}`,
+          `used=${uploadQuotaStateForClosedLoop && uploadQuotaStateForClosedLoop.used != null ? uploadQuotaStateForClosedLoop.used : '-'}`,
+          `limit=${uploadQuotaStateForClosedLoop && (uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit) ? (uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit) : '-'}`,
+          `remaining=${uploadQuotaStateForClosedLoop && uploadQuotaStateForClosedLoop.remaining != null ? uploadQuotaStateForClosedLoop.remaining : '-'}`,
+          `canUpload=${uploadQuotaStateForClosedLoop && uploadQuotaStateForClosedLoop.canUpload ? 1 : 0}`,
+          `exceeded=${uploadQuotaExceededForClosedLoop ? 1 : 0}`,
+        ].join(' '),
+      );
+      const beforeUploadComposerSnapshot = readClosedLoopComposerUploadPayloadSnapshot(
+        `before-upload-policy:run-${runId}:round-${round}:retry-${retryCurrentRound ? 1 : 0}`,
+      );
+      const composerAlreadyHasUploadPayloadForCurrentSend = !!(
+        beforeUploadComposerSnapshot.hasUploadPayload
+        && beforeUploadComposerSnapshot.uploadingCount <= 0
+      );
 
       const safeInterval = getClosedLoopEffectiveUploadInterval(closedLoopContinueState.mode, closedLoopCfg);
       const policyReason = safeInterval <= 1 ? 'every-round' : `after-${safeInterval}-replies`;
@@ -18010,21 +19387,117 @@
         }
       }
 
+      if (
+        needUpload
+        && composerAlreadyHasUploadPayloadForCurrentSend
+        && (
+          retryCurrentRound
+          || isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode)
+        )
+      ) {
+        ToolboxShell.appendLog(
+          [
+            '[CLOSED_LOOP][UPLOAD_POLICY_VETO_COMPOSER_ALREADY_HAS_PAYLOAD]',
+            `runId=${runId || '-'}`,
+            `round=${round || '-'}`,
+            `mode=${closedLoopContinueState.mode || '-'}`,
+            `retryCurrentRound=${retryCurrentRound ? 1 : 0}`,
+            `attachmentCount=${beforeUploadComposerSnapshot.attachmentCount}`,
+            `readyCount=${beforeUploadComposerSnapshot.readyCount}`,
+            `uploadingCount=${beforeUploadComposerSnapshot.uploadingCount}`,
+            `textLen=${beforeUploadComposerSnapshot.textLen}`,
+            'action=skip-upload-and-send-existing-composer',
+          ].join(' '),
+        );
+        needUpload = false;
+      }
+
+      if (needUpload && uploadQuotaExceededForClosedLoop) {
+        const composerSnapshotForQuotaBlock = readClosedLoopComposerUploadPayloadSnapshot(
+          `quota-block:run-${runId}:round-${round}`,
+        );
+        if (composerSnapshotForQuotaBlock.hasUploadPayload) {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][UPLOAD_POLICY_VETO_QUOTA_EXCEEDED_BUT_COMPOSER_HAS_PAYLOAD]',
+              `runId=${runId || '-'}`,
+              `round=${round || '-'}`,
+              `used=${uploadQuotaStateForClosedLoop.used}`,
+              `limit=${uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit}`,
+              `attachmentCount=${composerSnapshotForQuotaBlock.attachmentCount}`,
+              `uploadingCount=${composerSnapshotForQuotaBlock.uploadingCount}`,
+              'action=skip-upload-send-existing-composer',
+            ].join(' '),
+          );
+          needUpload = false;
+        } else {
+          ToolboxShell.appendLog(
+            [
+              '[CLOSED_LOOP][UPLOAD_BLOCKED_BY_QUOTA]',
+              `runId=${runId || '-'}`,
+              `round=${round || '-'}`,
+              `used=${uploadQuotaStateForClosedLoop.used}`,
+              `limit=${uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit}`,
+              `remaining=${uploadQuotaStateForClosedLoop.remaining}`,
+              'action=pause-closed-loop',
+            ].join(' '),
+          );
+          setStatus(
+            `上传额度已达上限：${uploadQuotaStateForClosedLoop.used}/${uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit}，闭环已暂停`,
+            'warn',
+            {
+              persist: false,
+              ttlMs: 2500,
+              hideTopAlert: true,
+              hideHeaderBadge: true,
+              shortText: '上传超限',
+            },
+          );
+          pauseClosedLoopContinue('upload-quota-exceeded', {
+            level: 'warn',
+            shortText: '上传超限',
+            message: '上传额度已达上限，已停止本轮闭环，避免继续重复上传',
+          });
+          return;
+        }
+      }
+
       ToolboxShell.appendLog(
         `[CLOSED_LOOP][UPLOAD_DECISION] `
         + `runId=${runId || '-'} `
         + `round=${round || '-'} `
         + `needUpload=${needUpload ? 1 : 0} `
         + `mode=${closedLoopContinueState.mode || '-'} `
+        + `retryCurrentRound=${retryCurrentRound ? 1 : 0} `
+        + `uploadQuotaUsed=${uploadQuotaStateForClosedLoop && uploadQuotaStateForClosedLoop.used != null ? uploadQuotaStateForClosedLoop.used : '-'} `
+        + `uploadQuotaLimit=${uploadQuotaStateForClosedLoop && (uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit) ? (uploadQuotaStateForClosedLoop.maxFiles || uploadQuotaStateForClosedLoop.limit) : '-'} `
+        + `uploadQuotaExceeded=${uploadQuotaExceededForClosedLoop ? 1 : 0} `
+        + `composerHasUploadPayload=${composerAlreadyHasUploadPayloadForCurrentSend ? 1 : 0} `
+        + `composerAttachmentCount=${beforeUploadComposerSnapshot.attachmentCount} `
+        + `composerUploadingCount=${beforeUploadComposerSnapshot.uploadingCount} `
+        + `composerTextLen=${beforeUploadComposerSnapshot.textLen} `
         + `activeGroupHasUploadableFiles=${activeGroupHasUploadableFiles ? 1 : 0} `
         + `groupId=${activeUploadGroupId || '-'}`,
       );
+
+      if (maybeHardStopClosedLoopByTerminalCount('before-upload', round)) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][STEP_ABORT_TERMINAL_HARD_STOP] stage=before-upload runId=${runId || '-'} round=${round || '-'}`,
+        );
+        return;
+      }
 
       if (needUpload) {
         setClosedLoopPhase(CLOSED_LOOP_PHASES.UPLOAD_BEFORE_SEND, {
           reason: `round-${round}-upload-before-send`,
         });
-        if (shouldSkipDuplicateClosedLoopUpload(runId, round)) {
+        const skipDuplicateUpload = shouldSkipDuplicateClosedLoopUpload(runId, round, {
+          source: `before-round-upload:run-${runId}:round-${round}`,
+          retryCurrentRound,
+          composerSnapshot: beforeUploadComposerSnapshot,
+          blockWhenComposerHasPayload: true,
+        });
+        if (skipDuplicateUpload) {
           ToolboxShell.appendLog(
             `[CLOSED_LOOP][UPLOAD_SKIP_DUPLICATE] runId=${runId} round=${round} reason=same-round-already-uploaded note=this-is-retry-not-new-round`,
           );
@@ -18034,7 +19507,8 @@
           );
         }
 
-        if (!shouldSkipDuplicateClosedLoopUpload(runId, round)) {
+        if (!skipDuplicateUpload) {
+          markClosedLoopUploadInFlight(runId, round, `round-upload-start:${closedLoopContinueState.mode || '-'}`);
           ToolboxShell.appendLog(
             [
               '[CLOSED_LOOP][ROUND_UPLOAD_START]',
@@ -18058,11 +19532,14 @@
             groupId: activeUploadGroupId,
             mode: closedLoopContinueState.mode,
             uploadEveryRound,
-            forceReupload: uploadEveryRound,
+            forceReupload: uploadEveryRound && !retryCurrentRound,
             preserveFiles: true,
+            retryCurrentRound,
+            composerSnapshotBeforeUpload: beforeUploadComposerSnapshot,
           });
 
           if (!uploadResult || uploadResult.ok !== true) {
+            clearClosedLoopUploadInFlight(runId, round, `upload-failed:${uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown'}`);
             const reason = uploadResult && uploadResult.reason ? uploadResult.reason : 'unknown';
             const uploadSharedSource = getClosedLoopUploadFailedSource(useHotkey, round, closedLoopMode);
             ToolboxShell.appendLog(
@@ -18070,11 +19547,69 @@
             );
             if (isClosedLoopUserCancelledReason(reason)) {
               stopClosedLoopContinue(`upload-failed:${reason}`);
-            } else {
-              setStatus(`闭环上传失败，准备恢复：${reason}`, 'error');
-              recoverClosedLoopContinue(runId, `upload-failed:${reason}`, {
-                delayMs: 5000,
+            } else if (String(reason).includes('upload-quota-exceeded')) {
+              setStatus(
+                '上传额度已达上限，闭环已暂停，避免继续重复上传',
+                'warn',
+                {
+                  persist: false,
+                  ttlMs: 2500,
+                  hideTopAlert: true,
+                  hideHeaderBadge: true,
+                  shortText: '上传超限',
+                },
+              );
+              pauseClosedLoopContinue('upload-quota-exceeded', {
+                level: 'warn',
+                shortText: '上传超限',
+                message: '上传额度已达上限，已停止本轮闭环，避免继续重复上传',
               });
+            } else {
+              const activeFilesAfterUploadFail = getActiveGroupFiles().filter((item) => {
+                const stateName = typeof normalizeUploadStateValue === 'function'
+                  ? normalizeUploadStateValue(item && item.state, '')
+                  : String(item && item.state ? item.state : '').trim();
+                return stateName
+                  && stateName !== UploadState.CANCELLED
+                  && stateName !== UploadState.ATTACHED;
+              }).length;
+              const shouldPauseUploadFail = !!(
+                activeFilesAfterUploadFail > 0
+                && (
+                  String(reason).includes('no-real-submit-button')
+                  || String(reason).includes('send_button_not_found')
+                  || String(reason).includes('payload_ready_but_send_button_missing')
+                  || String(reason).includes('attachment_ready_but_send_button_missing')
+                  || String(reason).includes('composer_empty')
+                )
+              );
+              if (shouldPauseUploadFail) {
+                const pauseMsg = `闭环上传失败，已暂停，避免重复重试：${reason}`;
+                ToolboxShell.appendLog(
+                  `[CLOSED_LOOP][UPLOAD_FAILED_PAUSE_NO_SPIN] `
+                  + `runId=${runId || '-'} `
+                  + `round=${round || '-'} `
+                  + `reason=${reason || '-'} `
+                  + `activeFiles=${activeFilesAfterUploadFail}`,
+                );
+                pauseClosedLoopContinue(`upload-failed-paused:${reason}`, {
+                  level: 'warn',
+                  shortText: '上传失败',
+                  message: pauseMsg,
+                });
+                setStatus(pauseMsg, 'warn', {
+                  persist: false,
+                  ttlMs: 2500,
+                  hideTopAlert: true,
+                  hideHeaderBadge: true,
+                  shortText: '已暂停',
+                });
+              } else {
+                setStatus(`闭环上传失败，准备恢复：${reason}`, 'error');
+                recoverClosedLoopContinue(runId, `upload-failed:${reason}`, {
+                  delayMs: 5000,
+                });
+              }
             }
             return;
           }
@@ -18091,11 +19626,13 @@
           });
           renderClosedLoopContinueButton();
 
-          closedLoopUploadDedupState.runId = runId;
-          closedLoopUploadDedupState.lastUploadRound = round;
-          closedLoopUploadDedupState.lastUploadReason = round === 1
-            ? 'closed-loop-initial'
-            : (isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode) ? 'closed-loop-every-round' : 'closed-loop-every-n');
+          markClosedLoopUploadDoneForRound(
+            runId,
+            round,
+            round === 1
+              ? 'closed-loop-initial'
+              : (isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode) ? 'closed-loop-every-round' : 'closed-loop-every-n'),
+          );
         }
       }
 
@@ -18351,6 +19888,13 @@
             `[CLOSED_LOOP][WAIT_ATTACHMENT_BEFORE_CONTINUE_SEND] runId=${runId} round=${round} source=${stepSourceTag} uploadEveryRound=${isClosedLoopEveryRoundUploadMode(closedLoopContinueState.mode) ? 1 : 0}`,
           );
 
+          if (maybeHardStopClosedLoopByTerminalCount('before-continue-send', round)) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][STEP_ABORT_TERMINAL_HARD_STOP] stage=before-continue-send runId=${runId || '-'} round=${round || '-'}`,
+            );
+            return;
+          }
+
           const sendResult = await sendClosedLoopContinuePrompt(continuePromptText, {
             ...closedLoopFlowOptions,
             source: stepSourceTag,
@@ -18429,12 +19973,23 @@
           `[COPY_HOTKEY_UPLOAD_VERIFY_LOOP][terminal-signal] round=${round} status=${terminalStatus} reason=${result.reason || 'assistant-terminal-signal'}`,
         );
 
+        if (maybeHardStopClosedLoopByTerminalCount('before-send-terminal-before-verify', round)) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][TERMINAL_BEFORE_SEND_HARD_STOP] runId=${runId || '-'} round=${round || '-'}`,
+          );
+          return;
+        }
+
         const verifyResult = await runClosedLoopDoneVerification(
           runId,
           round,
           result.reason || 'assistant-terminal-signal',
           terminalStatus,
         );
+
+        if (verifyResult && verifyResult.hardStopped) {
+          return;
+        }
 
         if (verifyResult && verifyResult.ok) {
           const finalStatus = verifyResult.status || terminalStatus || 'done';
@@ -18614,7 +20169,13 @@
               level: 'warn',
               message: pauseMsg,
             });
-            setStatus(pauseMsg, 'warn');
+            setStatus(pauseMsg, 'warn', {
+              persist: false,
+              ttlMs: 2500,
+              hideTopAlert: true,
+              hideHeaderBadge: true,
+              shortText: '已暂停',
+            });
             renderClosedLoopContinueButtons();
             return;
           }
@@ -18630,7 +20191,13 @@
             level: 'warn',
             message: msg,
           });
-          setStatus(msg, 'warn');
+          setStatus(msg, 'warn', {
+            persist: false,
+            ttlMs: 2500,
+            hideTopAlert: true,
+            hideHeaderBadge: true,
+            shortText: '已暂停',
+          });
           renderClosedLoopContinueButtons();
           return;
         }
@@ -18651,7 +20218,13 @@
             level: 'warn',
             message: msg,
           });
-          setStatus(msg, 'warn');
+          setStatus(msg, 'warn', {
+            persist: false,
+            ttlMs: 2500,
+            hideTopAlert: true,
+            hideHeaderBadge: true,
+            shortText: '已暂停',
+          });
           renderClosedLoopContinueButtons();
           return;
         }
@@ -18755,12 +20328,30 @@
         ToolboxShell.appendLog(
           `[CLOSED_LOOP][STEP_TERMINAL_SIGNAL] source=after-wait-check runId=${runId} round=${round} status=${terminalStatus} reason=${stopSignalResult.reason || 'terminal-signal'}`,
         );
+        const terminalHitInfo = recordClosedLoopTerminalStopHit(
+          stopSignalResult,
+          round,
+          'after-wait-terminal-stop',
+        );
+        if (
+          terminalHitInfo.hitCount >= CLOSED_LOOP_TERMINAL_HARD_STOP_HIT_COUNT
+          || terminalHitInfo.domCount >= CLOSED_LOOP_TERMINAL_HARD_STOP_HIT_COUNT
+          || maybeHardStopClosedLoopByTerminalCount('after-wait-terminal-stop', round)
+        ) {
+          hardStopClosedLoopByTerminalSignal('after-wait-second-terminal-stop', {
+            round,
+          });
+          return;
+        }
         const verifyResult = await runClosedLoopDoneVerification(
           runId,
           round,
           stopSignalResult.reason || 'terminal-signal',
           terminalStatus,
         );
+        if (verifyResult && verifyResult.hardStopped) {
+          return;
+        }
         if (verifyResult && verifyResult.ok) {
           const finalStatus = verifyResult.status || terminalStatus || 'done';
           finishClosedLoopContinue(`assistant-terminal-signal-verified:${finalStatus}`, {
@@ -19058,8 +20649,64 @@
               `runId=${runId}`,
               `token=${stepToken}`,
               `phase=${closedLoopContinueState.phase || '-'}`,
+              `waitKind=${closedLoopContinueState.waitKind || '-'}`,
+              `running=${closedLoopContinueState.running ? 1 : 0}`,
+              `nextStepTimer=${closedLoopContinueState.nextStepTimer ? 1 : 0}`,
+              `timerId=${closedLoopContinueState.timerId ? 1 : 0}`,
+              `retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0}`,
             ].join(' '),
           );
+          window.setTimeout(() => {
+            try {
+              const phaseText = String(closedLoopContinueState.phase || '').trim();
+              const waitKind = String(closedLoopContinueState.waitKind || '').trim();
+
+              const looksLikeShouldContinue = !!(
+                closedLoopContinueState.running
+                && closedLoopContinueState.runId === runId
+                && !closedLoopContinueState.currentStepRunning
+                && !closedLoopContinueState.nextStepTimer
+                && !closedLoopContinueState.timerId
+                && !closedLoopContinueState.retryTimerId
+                && !closedLoopContinueState.terminalStopHardStopped
+                && !closedLoopContinueState.cancelRequested
+                && (
+                  phaseText === CLOSED_LOOP_PHASES.NEXT_ROUND
+                  || phaseText === 'next_round'
+                  || phaseText === 'reply_done_stable'
+                  || phaseText === CLOSED_LOOP_PHASES.REPLY_DONE_STABLE
+                  || waitKind === 'next-round-ready'
+                  || waitKind === ''
+                )
+              );
+
+              if (!looksLikeShouldContinue) {
+                ToolboxShell.appendLog(
+                  `[CLOSED_LOOP][STEP_EXIT_GUARD_SKIP] `
+                  + `runId=${runId || '-'} `
+                  + `phase=${phaseText || '-'} `
+                  + `waitKind=${waitKind || '-'} `
+                  + `running=${closedLoopContinueState.running ? 1 : 0} `
+                  + `nextStepTimer=${closedLoopContinueState.nextStepTimer ? 1 : 0} `
+                  + `timerId=${closedLoopContinueState.timerId ? 1 : 0} `
+                  + `retryTimer=${closedLoopContinueState.retryTimerId ? 1 : 0} `
+                  + `terminal=${closedLoopContinueState.terminalStopHardStopped ? 1 : 0} `
+                  + `cancel=${closedLoopContinueState.cancelRequested ? 1 : 0}`,
+                );
+                return;
+              }
+
+              ensureClosedLoopNextRoundScheduled('step-exit-no-next-step-guard', {
+                delayMs: 0,
+              });
+            } catch (error) {
+              const errText = error && error.message ? error.message : String(error);
+              console.error('[CLOSED_LOOP][STEP_EXIT_GUARD_FAILED]', error);
+              ToolboxShell.appendLog(
+                `[CLOSED_LOOP][STEP_EXIT_GUARD_FAILED] runId=${runId || '-'} error=${errText}`,
+              );
+            }
+          }, 350);
         } else {
           ToolboxShell.appendLog(
             [
@@ -19139,6 +20786,28 @@
     }
 
     function scheduleClosedLoopButtonHitTest(reason = '') {
+      const activeTab = (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.getActiveTab === 'function'
+      )
+        ? ToolboxShell.getActiveTab()
+        : (
+          rootElRef && rootElRef.dataset
+            ? String(rootElRef.dataset.activeTab || '')
+            : ''
+        );
+      if (
+        activeTab
+        && activeTab !== 'home'
+        && activeTab !== 'upload'
+        && activeTab !== 'autoq'
+      ) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][HIT_TEST_SKIP] reason=inactive-tab activeTab=${activeTab} source=${reason || '-'}`,
+        );
+        return;
+      }
       const run = () => {
         logClosedLoopButtonHitTest(reason);
       };
@@ -19525,9 +21194,23 @@
     }
 
     function rebindClosedLoopContinueUi(rootEl, reason = 'after-render') {
-      bindClosedLoopContinueButtons(rootEl || rootElRef || document, reason);
+      const scope = rootEl || rootElRef || document;
+      bindClosedLoopContinueButtons(scope, reason);
       bindClosedLoopDocumentClickFallback(reason);
+      bindCriticalUploadButtonDocumentFallback(`closed-loop-rebind:${reason || '-'}`);
+      bindCriticalUploadButtonDirectFallback(scope, `closed-loop-rebind:${reason || '-'}`);
       renderClosedLoopContinueButtons();
+      window.setTimeout(() => {
+        try {
+          bindCriticalUploadButtonDirectFallback(rootElRef || document, `closed-loop-rebind-late:${reason || '-'}`);
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CRITICAL_BUTTON_CLICK][LATE_BIND_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CRITICAL_BUTTON_CLICK][LATE_BIND_FAILED] reason=${reason || '-'} error=${errText}`,
+          );
+        }
+      }, 0);
       if (shouldRunClosedLoopDiagnostics(reason)) {
         scheduleClosedLoopButtonHitTest(`rebind:${reason || '-'}`);
       }
@@ -19653,8 +21336,70 @@
       }, resetMs);
     }
 
+    function canStartCopyHotkeyContinueByAuthority(action, source = '') {
+      const status = getUnifiedRuntimeStatus
+        ? getUnifiedRuntimeStatus(`copy-hotkey-continue-start-gate:${source || '-'}`)
+        : null;
+      const authority = typeof getToolboxAuthorityState === 'function'
+        ? getToolboxAuthorityState(`copy-hotkey-continue-start-gate:${source || '-'}`, { force: true })
+        : null;
+      const flags = authority && authority.flags ? authority.flags : {};
+      const reply = authority && authority.reply ? authority.reply : {};
+      const composer = authority && authority.composer ? authority.composer : {};
+      const top = status && status.topReplyStatus ? status.topReplyStatus : {};
+      const capability = status && status.capability ? status.capability : {};
+      const replyState = String(
+        (status && (status.replyState || status.authorityReplyState))
+        || reply.state
+        || top.responseState
+        || '',
+      ).trim();
+      const replyBusy = !!(
+        (status && (status.replyBusy || status.answering || status.busy))
+        || flags.replyBusy
+        || flags.answering
+        || flags.busy
+        || top.busy
+        || top.answering
+        || capability.is_responding
+        || capability.isResponding
+      );
+      const canInput = !!(
+        (status && (status.canInput || status.inputable || status.ready))
+        || flags.canInput
+        || flags.ready
+        || top.ready
+      );
+      const stop = !!(
+        (status && (status.stop || status.authorityStop))
+        || composer.hasRealStopButton
+      );
+      const ok = !replyBusy && canInput && !stop;
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_CONTINUE][START_GATE] `
+        + `action=${action || '-'} `
+        + `source=${source || '-'} `
+        + `ok=${ok ? 1 : 0} `
+        + `replyState=${replyState || '-'} `
+        + `replyBusy=${replyBusy ? 1 : 0} `
+        + `canInput=${canInput ? 1 : 0} `
+        + `canSend=${flags.canSend ? 1 : 0} `
+        + `realSendReady=${composer.realSendButtonReady ? 1 : 0} `
+        + `stop=${stop ? 1 : 0}`
+      );
+      return ok;
+    }
+
     async function runCopyHotkeyContinueOnce(source = 'button') {
       const src = String(source || 'button').trim() || 'button';
+
+      if (!canStartCopyHotkeyContinueByAuthority('copy-hotkey-continue', src)) {
+        setStatus('当前页面未处于可输入状态，已阻止复制+快捷键+继续', 'warn');
+        return {
+          ok: false,
+          reason: 'start-gate-blocked',
+        };
+      }
 
       if (isCopyHotkeyLoopActive() || isCopyHotkeyUploadVerifyLoopActive()) {
         ToolboxShell.appendLog(`[COPY_HOTKEY_CONTINUE][skip] source=${src} reason=loop-running`);
@@ -19802,6 +21547,14 @@
 
       if (COPY_HOTKEY_LOOP_STOP_PHASES.has(loopTask.phase) || copyHotkeyContinueLoopRunning) {
         return requestCopyHotkeyContinueLoopStop(src);
+      }
+
+      if (!canStartCopyHotkeyContinueByAuthority('loop-copy-hotkey-continue', src)) {
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][START_BLOCKED] source=${src} reason=start-gate-blocked`
+        );
+        setStatus('当前页面未处于可输入状态，已阻止无限连续复制+快捷键+继续', 'warn');
+        return false;
       }
 
       if (loopTask.phase === 'stopping') {
@@ -21813,56 +23566,12 @@
       return ensureUploadQueueStore().normalizeUploadSendState(...args);
     }
 
-    function getUploadItemSchemaAuditData(item) {
-      const normalized = item && typeof item === 'object' ? item : {};
-      return {
-        id: normalized.id || '',
-        name: normalized.name || '',
-        groupId: normalized.groupId || '',
-        mimeType: normalized.mimeType || '',
-        downloadUrl: normalized.downloadUrl || '',
-        flaskPath: normalized.flaskPath || '',
-        registryStatus: normalized.registryStatus || '',
-        attachState: normalized.attachState || '',
-        composerPresence: normalized.composerPresence || '',
-        sendState: normalized.sendState || '',
-        restoreState: normalized.restoreState || '',
-        persistedKind: normalized.persistedKind || '',
-      };
+    function getUploadItemSchemaAuditData(...args) {
+      return ensureUploadQueueStore().getUploadItemSchemaAuditData(...args);
     }
 
-    function appendUploadSchemaAuditLog(tag, item) {
-      if (!isUploadDebugEnabled || !isUploadDebugEnabled()) {
-        return;
-      }
-      const audit = getUploadItemSchemaAuditData(item);
-      const line = [
-        `[STATE_SCHEMA][${tag}]`,
-        `id=${audit.id || '-'}`,
-        `name=${audit.name || '-'}`,
-        `groupId=${audit.groupId || '-'}`,
-        `mimeType=${audit.mimeType || '-'}`,
-        `downloadUrl=${audit.downloadUrl || '-'}`,
-        `flaskPath=${audit.flaskPath || '-'}`,
-        `registryStatus=${audit.registryStatus || '-'}`,
-        `attachState=${audit.attachState || '-'}`,
-        `composerPresence=${audit.composerPresence || '-'}`,
-        `sendState=${audit.sendState || '-'}`,
-        `restoreState=${audit.restoreState || '-'}`,
-        `persistedKind=${audit.persistedKind || '-'}`,
-      ].join(' ');
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLogIfChanged === 'function') {
-        ToolboxShell.appendLogIfChanged(
-          `STATE_SCHEMA:${tag}:${audit.id || audit.name || '-'}`,
-          Object.values(audit).join('|'),
-          line,
-          1500,
-        );
-      } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(line);
-      } else {
-        console.log(line);
-      }
+    function appendUploadSchemaAuditLog(...args) {
+      return ensureUploadQueueStore().appendUploadSchemaAuditLog(...args);
     }
 
 
@@ -25113,6 +26822,71 @@
       return true;
     }
 
+    function hideTopStatusAlertSlotElement(el, reason = '') {
+      if (!(el instanceof HTMLElement)) {
+        return false;
+      }
+
+      el.textContent = '';
+      el.title = '';
+      el.hidden = true;
+      el.setAttribute('aria-hidden', 'true');
+      el.dataset.variant = 'muted';
+      el.dataset.alertHidden = '1';
+
+      el.classList.add('cgpt-top-status-empty', 'is-hidden-placeholder');
+      el.classList.remove(
+        'cgpt-top-status-alert',
+        'cgpt-top-status-warning',
+        'cgpt-top-status-reminder',
+        'cgpt-top-status-error',
+        'cgpt-top-status-running',
+        'cgpt-top-status-danger',
+        'cgpt-top-status-variant-ok',
+        'cgpt-top-status-variant-danger',
+        'cgpt-top-status-variant-warning',
+        'cgpt-top-status-variant-info',
+        'cgpt-top-status-variant-muted',
+        'danger',
+        'red',
+        'busy',
+        'waiting',
+        'warning',
+        'orange',
+        'cgpt-btn-danger',
+        'cgpt-action-running',
+        'cgpt-btn-waiting-danger',
+      );
+
+      el.style.setProperty('display', 'none', 'important');
+      el.style.setProperty('visibility', 'hidden', 'important');
+      el.style.setProperty('width', '0', 'important');
+      el.style.setProperty('min-width', '0', 'important');
+      el.style.setProperty('max-width', '0', 'important');
+      el.style.setProperty('padding', '0', 'important');
+      el.style.setProperty('margin', '0', 'important');
+      el.style.setProperty('border-width', '0', 'important');
+      el.style.setProperty('pointer-events', 'none', 'important');
+      el.style.removeProperty('background');
+      el.style.removeProperty('background-color');
+      el.style.removeProperty('border-color');
+
+      if (
+        typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
+        && typeof ToolboxShell.appendLogIfChanged === 'function'
+      ) {
+        ToolboxShell.appendLogIfChanged(
+          'TOOLBOX_TOP_STATUS_ALERT_SLOT_HIDDEN',
+          `hidden|${reason || '-'}`,
+          `[TOOLBOX_TOP_STATUS][ALERT_SLOT_HIDDEN] reason=${reason || '-'}`,
+          3000,
+        );
+      }
+
+      return true;
+    }
+
     function updateTopStatusSlot(statusRoot, slotName, options = {}) {
       const {
         text = '',
@@ -25127,6 +26901,11 @@
         return null;
       }
       applyTopStatusFixedSlotWidth(el, slotName);
+
+      if (slotName === 'alert-state' && hidden === true) {
+        hideTopStatusAlertSlotElement(el, 'updateTopStatusSlot:early-hidden');
+        return el;
+      }
 
       // spacer 永远不能渲染成彩色胶囊，更不能出现空白红块。
       if (slotName === 'top-status-spacer') {
@@ -25198,33 +26977,52 @@
           text: String(text || '').trim(),
           message: String(title || '').trim(),
         };
-        const hasActiveAlert = (
+
+        const hasActiveAlert = !!(
           typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
           && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
           && ToolboxShell.hasActiveTopAlertEntry(alertEntry)
         );
+
         if (isHidden || !hasActiveAlert) {
-          el.textContent = '';
-          el.title = '';
-          el.style.display = 'none';
-          el.classList.remove(
-            'cgpt-top-status-alert',
-            'cgpt-top-status-warning',
-            'cgpt-top-status-reminder',
-            'cgpt-top-status-error',
+          hideTopStatusAlertSlotElement(
+            el,
+            `updateTopStatusSlot:hidden=${isHidden ? 1 : 0}:active=${hasActiveAlert ? 1 : 0}`,
           );
-        } else {
-          el.style.display = '';
-          el.textContent = '报错';
-          el.classList.remove(
-            'cgpt-top-status-warning',
-            'cgpt-top-status-reminder',
-          );
-          el.classList.add(
-            'cgpt-top-status-alert',
-            'cgpt-top-status-error',
-          );
+          return el;
         }
+
+        el.hidden = false;
+        el.removeAttribute('aria-hidden');
+        delete el.dataset.alertHidden;
+        el.classList.remove('cgpt-top-status-empty', 'is-hidden-placeholder');
+        el.style.removeProperty('width');
+        el.style.removeProperty('min-width');
+        el.style.removeProperty('max-width');
+        el.style.removeProperty('padding');
+        el.style.removeProperty('margin');
+        el.style.removeProperty('border-width');
+        el.style.setProperty('display', 'inline-flex', 'important');
+        el.style.setProperty('visibility', 'visible', 'important');
+        el.style.removeProperty('pointer-events');
+
+        el.textContent = alertEntry.text || '报错';
+        el.title = alertEntry.message || alertEntry.text || '当前存在报错';
+        el.classList.remove(
+          'cgpt-top-status-empty',
+          'is-hidden-placeholder',
+          'cgpt-top-status-warning',
+          'cgpt-top-status-reminder',
+          'cgpt-top-status-variant-warning',
+          'cgpt-top-status-variant-muted',
+        );
+        el.classList.add(
+          'cgpt-top-status-alert',
+          'cgpt-top-status-error',
+          'cgpt-top-status-variant-danger',
+        );
+        el.dataset.variant = 'danger';
       }
       if (stateClass) {
         [
@@ -25439,6 +27237,72 @@
         realStopButtonFound: hasRealStopButton,
         realButtonKind,
         inputable,
+      };
+    }
+
+    function classifyAuthorityComposerPayloadForState(composer = {}) {
+      const c = composer && typeof composer === 'object' ? composer : {};
+      const textLen = Math.max(0, Number(c.textLen || 0) || 0);
+      const composerCount = Math.max(0, Number(c.composerCount || 0) || 0);
+      const composerUploading = c.composerUploading === true;
+      const composerReady = c.composerReady === true || c.attachmentReady === true;
+      const hasTextPayload = textLen > 0;
+      const hasReadyAttachmentPayload = !!(
+        composerCount > 0
+        && composerReady
+        && composerUploading !== true
+      );
+      const hasAnyComposerAttachment = composerCount > 0 || composerUploading === true;
+      const realSendReady = !!(
+        c.hasRealSendButton === true
+        && c.realSendButtonReady === true
+        && c.hasRealStopButton !== true
+      );
+      const attachmentOnly = !!(
+        !hasTextPayload
+        && hasReadyAttachmentPayload
+      );
+      const attachmentOnlyWithoutReadySendButton = !!(
+        attachmentOnly
+        && !realSendReady
+      );
+      const hasCurrentComposerPayload = !!(
+        hasTextPayload
+        || hasReadyAttachmentPayload
+      );
+      /*
+       * pendingSendForMessage 的含义：
+       * 当前输入框里存在一条“可以或应该发送的消息”。
+       *
+       * 注意：
+       * 只有附件、没有文本、真实发送按钮不可用，不算 pendingSend。
+       * 这种状态只是“附件已在输入框中，等待用户补文本或等待页面按钮恢复”。
+       */
+      const pendingSendForMessage = !!(
+        hasTextPayload
+        || (
+          hasReadyAttachmentPayload
+          && realSendReady
+        )
+      );
+      const canSendCurrentComposer = !!(
+        hasCurrentComposerPayload
+        && realSendReady
+      );
+      return {
+        textLen,
+        composerCount,
+        composerUploading,
+        composerReady,
+        realSendReady,
+        hasTextPayload,
+        hasReadyAttachmentPayload,
+        hasAnyComposerAttachment,
+        hasCurrentComposerPayload,
+        attachmentOnly,
+        attachmentOnlyWithoutReadySendButton,
+        pendingSendForMessage,
+        canSendCurrentComposer,
       };
     }
 
@@ -25818,6 +27682,13 @@
         || text.includes('未找到 ChatGPT 发送按钮')
         || text.includes('send_button_not_found')
         || text.includes('send_button_not_ready')
+        || text.includes('继续指令发送失败')
+        || text.includes('继续发送失败')
+        || text.includes('输入框内容校验失败')
+        || text.includes('禁止空转')
+        || text.includes('continue-send-failed')
+        || text.includes('payload_dropped')
+        || text.includes('composer_empty')
       );
     }
 
@@ -25864,7 +27735,22 @@
       if (typeof ToolboxShell.clearStatus === 'function') {
         ToolboxShell.clearStatus('upload');
         ToolboxShell.clearStatus('send');
+        ToolboxShell.clearStatus('bridge');
+        ToolboxShell.clearStatus('autoqueue');
+        ToolboxShell.clearStatus('closed-loop');
+        ToolboxShell.clearStatus('ui');
       }
+      ToolboxShell.appendLog(
+        `[TOOLBOX_TOP_ALERT][CLEAR_STALE_IDLE_DONE] `
+        + `reason=${reason || '-'} `
+        + `message=${message || '-'} `
+        + `taskState=${snapshot.taskState || '-'} `
+        + `replyBusy=${snapshot.replyBusy ? 1 : 0} `
+        + `pendingSend=${snapshot.pendingSend ? 1 : 0} `
+        + `realSendReady=${snapshot.realSendReady ? 1 : 0} `
+        + `composerTextLen=${snapshot.composerTextLen || 0} `
+        + `composerCount=${snapshot.composerCount || 0}`,
+      );
       if (typeof renderToolboxTopStatus === 'function') {
         renderToolboxTopStatus({
           heavy: false,
@@ -26118,6 +28004,7 @@
       const attachmentUploading = !!composer.composerUploading;
       const inputable = !!composer.inputable;
       const sendReady = !!composer.realSendButtonReady;
+      const composerPayloadState = classifyAuthorityComposerPayloadForState(composer);
       const domContradictsStaleRuntime = domContradictsStaleReplyLock(composer, {
         ...runtime,
         response_state: responseState,
@@ -26163,8 +28050,36 @@
         };
       }
 
-      // DOM 优先级 3：有 payload 且发送按钮可用
-      if (hasPayload && sendReady) {
+      /*
+       * DOM 优先级 2.5：
+       * 只有附件、没有文本、真实发送按钮不可用。
+       *
+       * 这种状态不能叫“待发送”，否则 closed-loop 会以为当前消息还在等待发送，
+       * 然后一直卡在 pendingSend=1。
+       *
+       * 正确解释：
+       * - 输入框可继续输入
+       * - 附件状态由 attachment slot 显示
+       * - 不是 pendingSend
+       * - 不是 replyBusy
+       */
+      if (composerPayloadState.attachmentOnlyWithoutReadySendButton) {
+        return {
+          state: TOOLBOX_REPLY_STATES.READY,
+          text: '可输入',
+          variant: 'ok',
+          busy: false,
+          ready: true,
+          pendingSend: false,
+          sendReady: false,
+          answering: false,
+          reason: 'attachment-only-waiting-text-or-send-button',
+          pageOffline,
+        };
+      }
+
+      // DOM 优先级 3：当前 composer payload 已经可以发送
+      if (composerPayloadState.canSendCurrentComposer) {
         if (
           responseState === 'attachment_processing'
           || responseReason === 'send_button_not_found'
@@ -26180,30 +28095,32 @@
         }
         return {
           state: TOOLBOX_REPLY_STATES.WAITING_SEND,
-          text: '待发送',
+          text: '可发送',
           variant: 'ok',
           busy: false,
           ready: true,
           sendReady: true,
           pendingSend: true,
           answering: false,
-          reason: 'payload-ready-to-send',
+          reason: composerPayloadState.hasTextPayload
+            ? 'text-payload-ready-to-send'
+            : 'attachment-payload-ready-to-send',
           pageOffline,
         };
       }
 
-      // DOM 优先级 4：有 payload 但发送按钮暂不可用
-      if (hasPayload && !sendReady) {
+      // DOM 优先级 4：有文本 payload 但发送按钮暂不可用
+      if (composerPayloadState.hasTextPayload && !sendReady) {
         return {
           state: TOOLBOX_REPLY_STATES.WAITING_SEND,
-          text: '待发送',
+          text: '可发送',
           variant: 'warning',
           busy: false,
           ready: false,
           sendReady: false,
           pendingSend: true,
           answering: false,
-          reason: 'payload-waiting-send-button',
+          reason: 'text-payload-waiting-send-button',
           pageOffline,
         };
       }
@@ -26582,6 +28499,10 @@
         const uploadLimit = Number(uploadQuota.maxFiles || 0);
         const messageUsed = Number(messageQuota.used || 0);
         const messageLimit = Number(messageQuota.maxMessages || 0);
+        const uploadQuotaExceeded = Number(uploadLimit) > 0 && Number(uploadUsed) >= Number(uploadLimit);
+        const uploadQuotaRemaining = Number(uploadLimit) > 0
+          ? Math.max(0, Number(uploadLimit) - Number(uploadUsed))
+          : -1;
 
         const attachmentDisplay = buildToolboxAttachmentDisplay(composer, localQueue, false);
         const replyBusy = !!(
@@ -26589,6 +28510,24 @@
           || reply.answering === true
         );
         const taskBusy = task.busy === true;
+        const composerPayloadState = classifyAuthorityComposerPayloadForState(composer);
+        const pendingSendForAuthority = !!(
+          reply.pendingSend === true
+          && composerPayloadState.attachmentOnlyWithoutReadySendButton !== true
+        );
+        const canUploadForAuthority = !!(
+          !uploadQuotaExceeded
+          && !replyBusy
+          && taskBusy !== true
+          && composer.composerUploading !== true
+          && composer.hasRealStopButton !== true
+          && pendingSendForAuthority !== true
+          && composerPayloadState.hasCurrentComposerPayload !== true
+          && (
+            composer.inputable === true
+            || reply.state === TOOLBOX_REPLY_STATES.READY
+          )
+        );
 
         const authority = {
           builtAt: now,
@@ -26637,7 +28576,7 @@
             // 兼容旧字段：总忙碌显示，不用于按钮业务判断
             busy: replyBusy || taskBusy,
             answering: reply.answering === true,
-            pendingSend: reply.pendingSend === true,
+            pendingSend: pendingSendForAuthority,
             canSend: computeAuthorityCanSendFlags({
               composer,
               flags: {
@@ -26665,16 +28604,7 @@
                 || reply.state === TOOLBOX_REPLY_STATES.WAITING_SEND
               )
             ),
-            canUpload: !!(
-              !replyBusy
-              && composer.composerUploading !== true
-              && composer.hasRealStopButton !== true
-              && (
-                composer.inputable === true
-                || reply.state === TOOLBOX_REPLY_STATES.READY
-                || reply.state === TOOLBOX_REPLY_STATES.WAITING_SEND
-              )
-            ),
+            canUpload: canUploadForAuthority,
             hasStopButton: composer.hasRealStopButton === true,
           },
 
@@ -26684,6 +28614,44 @@
             responseReason: runtime.response_state_reason || runtime.responseReason || '',
           },
         };
+
+        if (
+          authority.flags.pendingSend === true
+          && authority.flags.canSend !== true
+          && authority.composer.textLen <= 0
+          && authority.composer.composerCount > 0
+          && authority.composer.realSendButtonReady !== true
+        ) {
+          ToolboxShell.appendLog(
+            `[STATE_CONFLICT][PENDING_SEND_ATTACHMENT_ONLY_BLOCKED] `
+            + `reason=${reason || '-'} `
+            + `replyState=${authority.reply.state || '-'} `
+            + `replyText=${authority.reply.text || '-'} `
+            + `pendingSend=${authority.flags.pendingSend ? 1 : 0} `
+            + `canSend=${authority.flags.canSend ? 1 : 0} `
+            + `canUpload=${authority.flags.canUpload ? 1 : 0} `
+            + `textLen=${authority.composer.textLen || 0} `
+            + `composerCount=${authority.composer.composerCount || 0} `
+            + `realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
+          );
+        }
+        if (
+          authority.flags.pendingSend === true
+          && authority.flags.canUpload === true
+        ) {
+          ToolboxShell.appendLog(
+            `[STATE_CONFLICT][PENDING_SEND_CAN_UPLOAD_BOTH_TRUE] `
+            + `reason=${reason || '-'} `
+            + `replyState=${authority.reply.state || '-'} `
+            + `replyText=${authority.reply.text || '-'} `
+            + `pendingSend=${authority.flags.pendingSend ? 1 : 0} `
+            + `canSend=${authority.flags.canSend ? 1 : 0} `
+            + `canUpload=${authority.flags.canUpload ? 1 : 0} `
+            + `textLen=${authority.composer.textLen || 0} `
+            + `composerCount=${authority.composer.composerCount || 0} `
+            + `realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
+          );
+        }
 
         toolboxAuthorityStateCache = authority;
         toolboxAuthorityStateCacheAt = now;
@@ -27003,9 +28971,9 @@
         }
 
         return {
-          text: '待发送',
+          text: '可发送',
           variant: 'warning',
-          title: `输入框已有待发送内容，等待 ChatGPT 发送按钮可用；textLen=${payload.textLen || 0}，attachment=${payload.hasAttachment ? 1 : 0}`,
+          title: `输入框已有可发送内容，等待 ChatGPT 发送按钮可用；textLen=${payload.textLen || 0}，attachment=${payload.hasAttachment ? 1 : 0}`,
           stateClass: 'cgpt-state-waiting',
         };
       }
@@ -27203,12 +29171,11 @@
       if (
         sendPhase === 'waiting_reply'
         || taskFlags.waitingReply
-        || legacyFlags.waitingReply
       ) {
         const replySlot = resolveReplyStateSlot(runtimeSnapshot, 'resolveTaskStateSlot:waiting-reply');
         const replyText = String(replySlot && replySlot.text || '').trim();
         if (
-          (replyText === '待发送' || replyText === '可输入' || replyText === '就绪')
+          (replyText === '待发送' || replyText === '可发送' || replyText === '可输入' || replyText === '就绪')
           && isRealSendButtonReadyForTopStatus()
           && !readStillGeneratingForHeal()
         ) {
@@ -27232,7 +29199,6 @@
         sendPhase === 'sending'
         || sendPhase === 'running'
         || taskFlags.messageSending
-        || legacyFlags.messageSending
       ) {
         return {
           text: '发送中',
@@ -27258,7 +29224,6 @@
         || uploadPhase === 'uploading'
         || isUploadPhaseActivelyRunning(uploadPhase)
         || (taskFlags.uploadRunning && uploadPhase !== 'failed' && uploadPhase !== 'error')
-        || (legacyFlags.running && uploadPhase !== 'failed' && uploadPhase !== 'error' && !taskFlags.uploadFailed)
       ) {
         return {
           text: '上传中',
@@ -27269,8 +29234,6 @@
 
       if (
         copyPhase === 'running'
-        || legacyFlags.copyLastReplyTaskRunning
-        || legacyFlags.copyHotkeyContinueLoopRunning
       ) {
         return {
           text: '处理中',
@@ -27460,24 +29423,60 @@
     }
 
     function resolveAlertStateSlot() {
+      /*
+       * alert-state 只显示真正报错。
+       *
+       * 上传额度超限不要在这里重复生成 warning 胶囊。
+       * 上传额度状态已经由 upload-usage 槽位显示，例如：
+       *   上传:98/80
+       *
+       * 如果这里再返回 warning，会和 hasActiveTopAlertEntry() 的“只显示 error”规则冲突，
+       * 最终容易出现一个没有文字的黄色空胶囊。
+       */
       let alertEntry = {
         visible: false,
         text: '',
         title: '',
         variant: 'muted',
+        level: '',
+        reason: '',
       };
+
       if (
         typeof ToolboxShell !== 'undefined'
+        && ToolboxShell
         && typeof ToolboxShell.getCurrentTopAlertEntry === 'function'
       ) {
-        alertEntry = ToolboxShell.getCurrentTopAlertEntry();
+        alertEntry = ToolboxShell.getCurrentTopAlertEntry() || alertEntry;
       }
+
+      const level = String(alertEntry.level || '').trim().toLowerCase();
+      const text = String(alertEntry.text || '').trim();
+      const title = String(alertEntry.title || alertEntry.message || '').trim();
+      const isRealError = !!(
+        alertEntry.visible === true
+        && level === 'error'
+        && (text || title)
+      );
+
+      if (!isRealError) {
+        return {
+          text: '',
+          title: '',
+          variant: 'muted',
+          hidden: true,
+          level: '',
+          reason: alertEntry.reason || '',
+        };
+      }
+
       return {
-        text: alertEntry.visible ? alertEntry.text : '',
-        title: alertEntry.title || '',
-        variant: alertEntry.variant || 'muted',
-        hidden: !alertEntry.visible,
-        level: alertEntry.level || '',
+        text: text || '报错',
+        title: title || text || '当前存在报错',
+        variant: 'danger',
+        hidden: false,
+        level: 'error',
+        reason: alertEntry.reason || '',
       };
     }
 
@@ -27774,7 +29773,7 @@
           && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
           && ToolboxShell.hasActiveTopAlertEntry(currentTopAlertEntry)
         )
-          ? (slotTexts['alert-state'] || '报错')
+          ? (slotTexts['alert-state'] || '-')
           : '-';
         return `${logKey}=${alertSlotText}`;
       }
@@ -28146,7 +30145,7 @@
         'turn-count': `轮数:${authority.page.turnCount || 0}`,
         'upload-usage': authority.usage.uploadText,
         'message-usage': authority.usage.messageText,
-        'alert-state': alertState.hidden ? '-' : (alertState.text || '报错'),
+        'alert-state': alertState.hidden ? '-' : (alertState.text || '-'),
       };
       ToolboxShell.appendLog(
         `[TOOLBOX_TOP_STATUS][SLOTS] `
@@ -28169,11 +30168,7 @@
         'turn-count': authorityTurnText,
         'upload-usage': authorityUploadText,
         'message-usage': authorityMessageText,
-        'alert-state': (
-          typeof ToolboxShell !== 'undefined'
-          && typeof ToolboxShell.hasActiveTopAlertEntry === 'function'
-          && ToolboxShell.hasActiveTopAlertEntry(currentTopAlertEntry)
-        ) ? '报错' : '-',
+        'alert-state': alertState.hidden ? '-' : (alertState.text || '-'),
       };
       logTopStatusSlots(
         slotTexts,
@@ -28216,10 +30211,15 @@
         `[PAGE_STATUS][RENDER] pageDisplayId=${pageDisplayId} pageTurn=${roundCount} `
         + `responseState=${responseState} reason=${reason}`,
       );
+      const uploadQuotaExceededForTopLog = Number(uploadQuota.used || 0) >= Number(
+        uploadQuota.maxFiles || uploadQuota.limit || 80,
+      );
       ToolboxShell.appendLog(
         `[GLOBAL_USAGE][TOP_RENDER] reason=${reason} messageUsed=${messageQuota.used} `
         + `messageLimit=${messageQuota.maxMessages} uploadUsed=${uploadQuota.used} uploadLimit=${uploadQuota.maxFiles} `
-        + `dayKey=${dayKey}`,
+        + `dayKey=${dayKey} `
+        + `alertReason=${uploadQuotaExceededForTopLog ? 'upload-quota-exceeded' : '-'} `
+        + `alertSeverity=${uploadQuotaExceededForTopLog ? 'warn' : '-'}`,
       );
     }
 
@@ -34055,6 +36055,275 @@
       return String(lastNode.innerText || lastNode.textContent || '').trim();
     }
 
+    const CLOSED_LOOP_TERMINAL_HARD_STOP_HIT_COUNT = 2;
+
+    function countCanonicalStopSignalsInAssistantMessages(reason = 'unknown') {
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      const signal = String(
+        typeof resolveDefaultDoneSignal === 'function'
+          ? resolveDefaultDoneSignal()
+          : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>',
+      ).trim() || '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
+      const result = {
+        count: 0,
+        signal,
+        latestText: '',
+        latestHasSignal: false,
+        sources: [],
+      };
+      try {
+        const nodes = Array.from(
+          document.querySelectorAll('[data-message-author-role="assistant"]'),
+        );
+        nodes.forEach((node, index) => {
+          const text = String(node && (node.innerText || node.textContent) || '').trim();
+          if (!text) {
+            return;
+          }
+          const normalized = typeof cleanAssistantTextForDoneSignal === 'function'
+            ? cleanAssistantTextForDoneSignal(text)
+            : text;
+          if (normalized.includes(signal)) {
+            result.count += 1;
+            result.sources.push(`assistant-dom-${index}`);
+          }
+          if (index === nodes.length - 1) {
+            result.latestText = normalized;
+            result.latestHasSignal = normalized.includes(signal);
+          }
+        });
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][TERMINAL_COUNT_DOM_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_COUNT_DOM_FAILED] reason=${src} error=${errText}`,
+        );
+      }
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][TERMINAL_SIGNAL_COUNT]',
+          `reason=${src}`,
+          `count=${result.count}`,
+          `latestHasSignal=${result.latestHasSignal ? 1 : 0}`,
+          `signal=${signal}`,
+          `sources=${result.sources.join(',') || '-'}`,
+        ].join(' '),
+      );
+      return result;
+    }
+
+    function recordClosedLoopTerminalStopHit(stopResult, round, source = 'unknown') {
+      const src = String(source || 'unknown').trim() || 'unknown';
+      const signal = String(
+        stopResult && stopResult.line
+          ? stopResult.line
+          : (
+            typeof resolveDefaultDoneSignal === 'function'
+              ? resolveDefaultDoneSignal()
+              : '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>'
+          ),
+      ).trim() || '<<<XZ_TOOLBOX_BATCH_TASK_STOP_7F3B9C>>>';
+      const now = Date.now();
+      const domCountResult = countCanonicalStopSignalsInAssistantMessages(`record-hit:${src}`);
+      closedLoopContinueState.terminalStopHitCount = Math.max(
+        0,
+        Number(domCountResult.count || 0),
+      );
+      if (!closedLoopContinueState.terminalStopFirstHitAtMs) {
+        closedLoopContinueState.terminalStopFirstHitAtMs = now;
+      }
+      closedLoopContinueState.terminalStopLastHitAtMs = now;
+      closedLoopContinueState.terminalStopLastRound = Number(round || closedLoopContinueState.round || 0) || 0;
+      closedLoopContinueState.terminalStopLastSignal = signal;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][TERMINAL_STOP_HIT_RECORD]',
+          `source=${src}`,
+          `runId=${closedLoopContinueState.runId || '-'}`,
+          `round=${round || '-'}`,
+          `hitCount=${closedLoopContinueState.terminalStopHitCount}`,
+          `domCount=${domCountResult.count}`,
+          `signal=${signal}`,
+        ].join(' '),
+      );
+      return {
+        hitCount: closedLoopContinueState.terminalStopHitCount,
+        domCount: domCountResult.count,
+        signal,
+      };
+    }
+
+    function hardStopClosedLoopByTerminalSignal(reason = 'terminal-stop-confirmed', options = {}) {
+      const src = String(reason || 'terminal-stop-confirmed').trim() || 'terminal-stop-confirmed';
+      const runId = closedLoopContinueState.runId;
+      const round = Number(options.round || closedLoopContinueState.round || 0) || 0;
+      const hitCount = Math.max(0, Number(closedLoopContinueState.terminalStopHitCount || 0));
+      if (closedLoopContinueState.terminalStopHardStopped) {
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_ALREADY_DONE] reason=${src} runId=${runId || '-'} round=${round || '-'} hitCount=${hitCount}`,
+        );
+        return true;
+      }
+      closedLoopContinueState.terminalStopHardStopped = true;
+      closedLoopContinueState.terminalStopHardStopReason = src;
+      closedLoopContinueState.terminalStopLastHitAtMs = Date.now();
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][TERMINAL_HARD_STOP_BEGIN]',
+          `reason=${src}`,
+          `runId=${runId || '-'}`,
+          `round=${round || '-'}`,
+          `hitCount=${hitCount}`,
+          `mode=${closedLoopContinueState.mode || '-'}`,
+        ].join(' '),
+      );
+      try {
+        clearClosedLoopStepTimer(`terminal-hard-stop:${src}`);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][TERMINAL_HARD_STOP_CLEAR_STEP_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_CLEAR_STEP_FAILED] reason=${src} error=${errText}`,
+        );
+      }
+      try {
+        clearClosedLoopRetryTimer(`terminal-hard-stop:${src}`);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][TERMINAL_HARD_STOP_CLEAR_RETRY_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_CLEAR_RETRY_FAILED] reason=${src} error=${errText}`,
+        );
+      }
+      try {
+        clearClosedLoopButtonWaitState(`terminal-hard-stop:${src}`);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][TERMINAL_HARD_STOP_CLEAR_BUTTON_WAIT_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_CLEAR_BUTTON_WAIT_FAILED] reason=${src} error=${errText}`,
+        );
+      }
+      copyHotkeyUploadVerifyLoopStopRequested = true;
+      state.cancelWaitingSend = true;
+      state.messageSendCancelRequested = true;
+      try {
+        cancelCurrentUploadSend(`terminal-hard-stop:${src}`);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][TERMINAL_HARD_STOP_CANCEL_UPLOAD_SEND_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_CANCEL_UPLOAD_SEND_FAILED] reason=${src} error=${errText}`,
+        );
+      }
+      try {
+        cancelWaitingSend(`terminal-hard-stop:${src}`);
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][TERMINAL_HARD_STOP_CANCEL_WAITING_SEND_FAILED]', error);
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][TERMINAL_HARD_STOP_CANCEL_WAITING_SEND_FAILED] reason=${src} error=${errText}`,
+        );
+      }
+      const loopTask = ensureCopyHotkeyUploadVerifyLoopTask();
+      loopTask.stopRequested = true;
+      loopTask.currentSubtask = 'terminal-hard-stopped';
+      loopTask.lastError = '';
+      logClosedLoopStopCause(`terminal-hard-stop:${src}`, { round, hitCount });
+      logClosedLoopRuntimeSnapshot('RUNNING_SET_FALSE', {
+        reason: `hardStopClosedLoopByTerminalSignal:${src}`,
+      });
+      closedLoopContinueState.running = false;
+      closedLoopContinueState.stopping = false;
+      closedLoopContinueState.cancelRequested = true;
+      closedLoopContinueState.cancelReason = `terminal-hard-stop:${src}`;
+      closedLoopContinueState.currentStepRunning = false;
+      closedLoopContinueState.currentStepToken = '';
+      closedLoopContinueState.retryingCurrentRound = false;
+      closedLoopContinueState.doneVerificationRunning = false;
+      closedLoopContinueState.doneVerificationSent = false;
+      closedLoopContinueState.doneVerificationRound = 0;
+      closedLoopContinueState.homeNavigationRunning = false;
+      closedLoopContinueState.waitKind = 'idle';
+      closedLoopContinueState.recoverReason = '';
+      closedLoopContinueState.recoverDelayMs = 0;
+      closedLoopContinueState.recoverStartedAtMs = 0;
+      closedLoopContinueState.recoverUntilMs = 0;
+      closedLoopContinueState.waitUntilMs = 0;
+      closedLoopContinueState.nextStepAt = 0;
+      closedLoopContinueState.delayUntilAt = 0;
+      closedLoopContinueState.nextStepCountdownEndAt = 0;
+      closedLoopContinueState.postReplyDelayRunning = false;
+      stopClosedLoopButtonTextTimer(`terminal-hard-stop:${src}`);
+      copyHotkeyUploadVerifyLoopRunning = false;
+      copyHotkeyUploadVerifyLoopStopRequested = false;
+      loopTask.stopRequested = false;
+      syncToolboxRunningOwner(`terminal-hard-stop:${src}`);
+      setCopyHotkeyUploadVerifyLoopPhase('success', `terminal-hard-stop:${src}`, {
+        cycleIndex: round,
+        currentSubtask: 'terminal-hard-stopped',
+      });
+      setClosedLoopPhase(CLOSED_LOOP_PHASES.IDLE, {
+        reason: `terminal-hard-stop:${src}`,
+      });
+      releaseUploadActionLock('copy-hotkey-upload-verify-loop');
+      setStatus(
+        `闭环任务已收到终止符 ${Math.max(hitCount, 1)} 次，已停止`,
+        'success',
+        {
+          persist: true,
+          shortText: '已停止',
+        },
+      );
+      renderClosedLoopContinueButtons();
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][TERMINAL_HARD_STOP_DONE]',
+          `reason=${src}`,
+          `runId=${runId || '-'}`,
+          `round=${round || '-'}`,
+          `hitCount=${hitCount}`,
+          'running=0',
+          'retryCleared=1',
+          'nextStepCleared=1',
+          'uploadBlocked=1',
+        ].join(' '),
+      );
+      return true;
+    }
+
+    function maybeHardStopClosedLoopByTerminalCount(reason = 'unknown', round = closedLoopContinueState.round) {
+      const src = String(reason || 'unknown').trim() || 'unknown';
+      if (!closedLoopContinueState.running && !closedLoopContinueState.doneVerificationRunning) {
+        return false;
+      }
+      const countResult = countCanonicalStopSignalsInAssistantMessages(`maybe-hard-stop:${src}`);
+      const hitCount = Math.max(
+        Number(closedLoopContinueState.terminalStopHitCount || 0) || 0,
+        Number(countResult.count || 0) || 0,
+      );
+      closedLoopContinueState.terminalStopHitCount = hitCount;
+      const shouldHardStop = hitCount >= CLOSED_LOOP_TERMINAL_HARD_STOP_HIT_COUNT;
+      ToolboxShell.appendLog(
+        [
+          '[CLOSED_LOOP][TERMINAL_HARD_STOP_CHECK]',
+          `reason=${src}`,
+          `runId=${closedLoopContinueState.runId || '-'}`,
+          `round=${round || '-'}`,
+          `hitCount=${hitCount}`,
+          `latestHasSignal=${countResult.latestHasSignal ? 1 : 0}`,
+          `doneVerificationRunning=${closedLoopContinueState.doneVerificationRunning ? 1 : 0}`,
+          `shouldHardStop=${shouldHardStop ? 1 : 0}`,
+        ].join(' '),
+      );
+      if (!shouldHardStop) {
+        return false;
+      }
+      return hardStopClosedLoopByTerminalSignal(`terminal-count:${src}`, {
+        round,
+      });
+    }
+
     function detectCopyHotkeyLoopStopSignal(cycleIndex) {
       const indexText = String(cycleIndex == null ? '-' : cycleIndex);
       const candidates = [];
@@ -34119,6 +36388,19 @@
           safeAppendLog(hitLine);
           if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
             ToolboxShell.appendLog(hitLine);
+          }
+          const hitInfo = recordClosedLoopTerminalStopHit(
+            terminal,
+            cycleIndex,
+            `detect:${candidate.source}`,
+          );
+          if (
+            hitInfo.hitCount >= CLOSED_LOOP_TERMINAL_HARD_STOP_HIT_COUNT
+            || hitInfo.domCount >= CLOSED_LOOP_TERMINAL_HARD_STOP_HIT_COUNT
+          ) {
+            ToolboxShell.appendLog(
+              `[COPY_HOTKEY_CONTINUE_LOOP][assistant-terminal-hard-stop-ready] index=${indexText} hitCount=${hitInfo.hitCount} domCount=${hitInfo.domCount} source=${candidate.source}`,
+            );
           }
           return {
             matched: true,
@@ -36704,6 +38986,90 @@
       url: 'https://chatgpt.com/',
     });
 
+    const CLOSED_LOOP_EVERY_ROUND_HOME_NAV_INTERVAL = 20;
+
+    function isClosedLoopEveryRoundHomeNavigationMode(modeOrAction) {
+      const text = String(modeOrAction || '').trim();
+      return !!(
+        text === CLOSED_LOOP_CONTINUE_MODES.WITH_HOTKEY_EVERY_ROUND
+        || text === CLOSED_LOOP_ACTIONS.WITH_HOTKEY_EVERY_ROUND.action
+        || text === 'with_hotkey_every_round'
+        || text === 'closed-loop-with-hotkey-upload-every-round'
+      );
+    }
+
+    function readClosedLoopCurrentPageDialogueCount(reason = 'unknown') {
+      const src = String(reason || 'unknown').trim() || 'unknown';
+
+      let count = 0;
+      let source = 'none';
+
+      try {
+        if (typeof getCurrentPageTurnCountSafe === 'function') {
+          const n = Number(getCurrentPageTurnCountSafe());
+          if (Number.isFinite(n) && n >= 0) {
+            count = Math.max(count, Math.floor(n));
+            source = 'getCurrentPageTurnCountSafe';
+          }
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][PAGE_DIALOGUE_COUNT_READ_FAILED]', {
+          source: src,
+          reader: 'getCurrentPageTurnCountSafe',
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][PAGE_DIALOGUE_COUNT_READ_FAILED] source=${src} reader=getCurrentPageTurnCountSafe error=${errText}`,
+        );
+      }
+
+      try {
+        if (
+          count <= 0
+          && typeof getToolboxAuthorityState === 'function'
+        ) {
+          const authority = getToolboxAuthorityState(`closed-loop-page-dialogue-count:${src}`, {
+            force: true,
+          });
+          const pageTurn = Number(
+            authority
+            && authority.page
+            && authority.page.turnCount != null
+              ? authority.page.turnCount
+              : (
+                authority
+                && authority.pageTurn != null
+                  ? authority.pageTurn
+                  : 0
+              ),
+          );
+          if (Number.isFinite(pageTurn) && pageTurn >= 0) {
+            count = Math.max(count, Math.floor(pageTurn));
+            source = 'getToolboxAuthorityState.page.turnCount';
+          }
+        }
+      } catch (error) {
+        const errText = error && error.message ? error.message : String(error);
+        console.error('[CLOSED_LOOP][PAGE_DIALOGUE_COUNT_AUTHORITY_FAILED]', {
+          source: src,
+          error_type: error && error.name,
+          error: errText,
+          stack: error && error.stack,
+        });
+        ToolboxShell.appendLog(
+          `[CLOSED_LOOP][PAGE_DIALOGUE_COUNT_AUTHORITY_FAILED] source=${src} error=${errText}`,
+        );
+      }
+
+      return {
+        count,
+        source,
+      };
+    }
+
     let lastUnifiedContinueHomeConfigLogKey = '';
 
     function getUnifiedContinueHomeNavigationConfig(mode = 'unknown') {
@@ -36742,52 +39108,113 @@
 
       config.interval = Math.max(1, Math.floor(config.interval));
 
+      if (isClosedLoopEveryRoundHomeNavigationMode(config.mode)) {
+        config.enabled = true;
+        config.interval = CLOSED_LOOP_EVERY_ROUND_HOME_NAV_INTERVAL;
+        config.url = DEFAULT_UNIFIED_CONTINUE_HOME_NAV.url;
+        config.spaOnly = true;
+      }
+
       const logKey = `${config.mode}|${config.enabled ? 1 : 0}|${config.interval}|${config.url}`;
       if (logKey !== lastUnifiedContinueHomeConfigLogKey) {
         lastUnifiedContinueHomeConfigLogKey = logKey;
         ToolboxShell.appendLog(
-          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=${config.mode || '-'} enabled=${config.enabled ? 1 : 0} interval=${config.interval} url=${config.url}`,
+          `[UNIFIED_CONTINUE_HOME][CONFIG] mode=${config.mode || '-'} enabled=${config.enabled ? 1 : 0} interval=${config.interval} url=${config.url} spaOnly=${config.spaOnly ? 1 : 0}`,
         );
       }
 
       return config;
     }
 
-    function shouldRunUnifiedContinueHomeNavigation(round, mode = 'unknown') {
+    function shouldRunUnifiedContinueHomeNavigation(round, mode = 'unknown', options = {}) {
+      const opts = options && typeof options === 'object' ? options : {};
       const config = getUnifiedContinueHomeNavigationConfig(mode);
       const currentRound = Number(round || 0);
+      const isEveryRoundHomeMode = isClosedLoopEveryRoundHomeNavigationMode(mode)
+        || isClosedLoopEveryRoundHomeNavigationMode(closedLoopContinueState.mode);
+
+      const dialogueSnapshot = opts.dialogueSnapshot && typeof opts.dialogueSnapshot === 'object'
+        ? opts.dialogueSnapshot
+        : readClosedLoopCurrentPageDialogueCount(`home-check:${mode}:round-${currentRound}`);
+
+      const pageDialogueCount = Math.max(
+        0,
+        Number(dialogueSnapshot && dialogueSnapshot.count != null ? dialogueSnapshot.count : 0) || 0,
+      );
+
+      const threshold = Math.max(
+        1,
+        Number(config.interval || CLOSED_LOOP_EVERY_ROUND_HOME_NAV_INTERVAL) || CLOSED_LOOP_EVERY_ROUND_HOME_NAV_INTERVAL,
+      );
+
+      ToolboxShell.appendLog(
+        [
+          '[UNIFIED_CONTINUE_HOME][CHECK]',
+          `mode=${mode || '-'}`,
+          `round=${Number.isFinite(currentRound) ? currentRound : '-'}`,
+          `enabled=${config.enabled ? 1 : 0}`,
+          `threshold=${threshold}`,
+          `pageDialogueCount=${pageDialogueCount}`,
+          `dialogueSource=${dialogueSnapshot && dialogueSnapshot.source ? dialogueSnapshot.source : '-'}`,
+          `everyRoundHomeMode=${isEveryRoundHomeMode ? 1 : 0}`,
+          `spaOnly=${config.spaOnly ? 1 : 0}`,
+        ].join(' '),
+      );
+
       if (!config.enabled) {
         return {
           ok: false,
           reason: 'disabled',
           config,
+          pageDialogueCount,
         };
       }
+
+      if (
+        isEveryRoundHomeMode
+        && pageDialogueCount >= threshold
+      ) {
+        return {
+          ok: true,
+          reason: 'page-dialogue-threshold-reached',
+          config,
+          pageDialogueCount,
+          threshold,
+        };
+      }
+
       if (!Number.isFinite(currentRound) || currentRound <= 0) {
         return {
           ok: false,
           reason: 'invalid-round',
           config,
+          pageDialogueCount,
         };
       }
-      if (currentRound % config.interval !== 0) {
+
+      if (currentRound % threshold !== 0) {
         return {
           ok: false,
           reason: 'interval-not-reached',
           config,
+          pageDialogueCount,
+          threshold,
         };
       }
+
       return {
         ok: true,
         reason: 'interval-reached',
         config,
+        pageDialogueCount,
+        threshold,
       };
     }
 
     async function runUnifiedContinueHomeNavigation(mode, round, reason = 'interval') {
       const config = getUnifiedContinueHomeNavigationConfig(mode);
       ToolboxShell.appendLog(
-        `[UNIFIED_CONTINUE_HOME][START] mode=${mode || '-'} round=${round || 0} reason=${reason || '-'} interval=${config.interval} url=${config.url}`,
+        `[UNIFIED_CONTINUE_HOME][START] mode=${mode || '-'} round=${round || 0} reason=${reason || '-'} interval=${config.interval} url=${config.url} spaOnly=${config.spaOnly ? 1 : 0}`,
       );
       setStatus(
         `连续运行已满 ${config.interval} 轮，准备回到首页后继续`,
@@ -36804,10 +39231,13 @@
       } else if (typeof runJumpHome === 'function') {
         result = await runJumpHome(`unified-continue-home:${mode || 'unknown'}`);
       } else {
-        window.location.assign(config.url);
+        ToolboxShell.appendLog(
+          `[UNIFIED_CONTINUE_HOME][SPA_ONLY_NAV_UNAVAILABLE] mode=${mode || '-'} round=${round || 0} reason=${reason || '-'} action=block-location-assign`,
+        );
         result = {
-          ok: true,
-          method: 'window.location.assign',
+          ok: false,
+          reason: 'spa-navigation-unavailable-location-assign-blocked',
+          method: 'none',
         };
       }
       const normalized = result && typeof result === 'object'
@@ -36976,36 +39406,16 @@
         }
       }
 
-      return new Promise((resolve) => {
-        window.setTimeout(() => {
-          try {
-            window.location.assign(targetUrl);
-            resolve({
-              ok: true,
-              reason: 'location-assign-scheduled',
-              method: 'window.location.assign',
-            });
-          } catch (error) {
-            const errText = error && error.message ? error.message : String(error);
-            console.error('[COPY_HOTKEY_CONTINUE_LOOP][home-nav-failed]', {
-              cycleIndex,
-              targetUrl,
-              error_type: error && error.name,
-              error: errText,
-              stack: error && error.stack,
-            });
-            ToolboxShell.appendLog(
-              `[COPY_HOTKEY_CONTINUE_LOOP][home-nav-failed] index=${cycleIndex} error=${errText}`
-            );
-            setStatus(`返回首页失败：${errText}`, 'error');
-            resolve({
-              ok: false,
-              reason: errText,
-              method: 'window.location.assign',
-            });
-          }
-        }, 600);
-      });
+      ToolboxShell.appendLog(
+        `[COPY_HOTKEY_CONTINUE_LOOP][home-nav-spa-only-failed] index=${cycleIndex} url=${targetUrl} action=block-location-assign`,
+      );
+      setStatus('返回首页失败：未找到站内新聊天入口，已阻止整页刷新', 'error');
+
+      return {
+        ok: false,
+        reason: 'spa-home-navigation-failed-location-assign-blocked',
+        method: 'none',
+      };
     }
 
     async function runCopyHotkeyLoopPostCycleActions(cycleIndex) {
@@ -40994,6 +43404,14 @@
         replyDoneStableByTopStatus: authorityForSnapshot.reply.state === TOOLBOX_REPLY_STATES.READY,
         canSend: authorityCanSendNow,
         canUpload: authorityForSnapshot.flags.canUpload,
+        uploadQuotaExceeded: authorityForSnapshot.flags.uploadQuotaExceeded === true
+          || (authorityForSnapshot.usage && authorityForSnapshot.usage.uploadQuotaExceeded === true),
+        uploadQuotaRemaining: Number.isFinite(Number(authorityForSnapshot.flags.uploadQuotaRemaining))
+          ? Number(authorityForSnapshot.flags.uploadQuotaRemaining)
+          : (authorityForSnapshot.usage && Number.isFinite(Number(authorityForSnapshot.usage.uploadQuotaRemaining)))
+            ? Number(authorityForSnapshot.usage.uploadQuotaRemaining)
+            : -1,
+        canUploadByHeader: authorityForSnapshot.flags.canUpload === true,
         canSendByTopStatus: authorityCanSendNow,
         canStartUploadByTopStatus: !!(
           authorityForSnapshot.flags.canUpload
@@ -41054,11 +43472,7 @@
         closedLoopContinueRound: closedLoopContinueState.round,
         closedLoopRetryingCurrentRound: closedLoopContinueState.retryingCurrentRound,
         closedLoopWaitVisual: getClosedLoopWaitVisualSnapshot(),
-        runningOwner: (
-          typeof window !== 'undefined' && window.__cgptToolboxRunningOwner
-            ? Object.assign({}, window.__cgptToolboxRunningOwner)
-            : null
-        ),
+        runningOwner: getFreshToolboxRunningOwnerSnapshot('build-upload-buttons-runtime-snapshot'),
         copyContinueTask: state.copyContinueTask,
         sendHotkeyTask: state.sendHotkeyTask,
         sendCopyHotkeyTask: normalizedSendCopyHotkeyTask,
@@ -41916,21 +44330,166 @@
       ].join('|');
     }
 
-    function countComposerDomRemoveFileButtons() {
+    function isInsideToolboxPanelElement(node) {
+      if (!(node instanceof Element)) {
+        return false;
+      }
+      return !!node.closest(
+        [
+          '#cgpt-upload-module',
+          '#cgpt-toolbox-root',
+          '#cgpt-toolbox-panel',
+          '[data-cgpt-toolbox-root="1"]',
+          '[data-cgpt-upload-root="1"]',
+          '[data-cgpt-upload-file-item]',
+          '[data-cgpt-file-item]',
+          '.cgpt-upload-file-item',
+          '.cgpt-upload-file-row',
+          '.cgpt-file-item',
+          '.cgpt-file-list',
+          '.cgpt-upload-list',
+          '.cgpt-upload-module',
+          '.cgpt-toolbox-panel',
+          '.cgpt-btn',
+        ].join(','),
+      );
+    }
+
+    function getTrustedChatComposerAttachmentScanRoot() {
       if (typeof document === 'undefined') {
+        return null;
+      }
+      try {
+        if (
+          typeof ComposerApi !== 'undefined'
+          && ComposerApi
+          && typeof ComposerApi.getComposerRoot === 'function'
+        ) {
+          const root = ComposerApi.getComposerRoot();
+          if (root instanceof HTMLElement && !isInsideToolboxPanelElement(root)) {
+            return root;
+          }
+        }
+      } catch (error) {
+        console.error('[COMPOSER][ATTACHMENT_SCAN_ROOT_FAILED]', error);
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLog === 'function'
+        ) {
+          ToolboxShell.appendLog(
+            `[COMPOSER][ATTACHMENT_SCAN_ROOT_FAILED] error=${
+              error && error.message ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      const editable = document.querySelector(
+        'main [contenteditable="true"], main textarea, form [contenteditable="true"], form textarea',
+      );
+      if (editable instanceof HTMLElement && !isInsideToolboxPanelElement(editable)) {
+        const form = editable.closest('form');
+        if (form instanceof HTMLElement && !isInsideToolboxPanelElement(form)) {
+          return form;
+        }
+        const composerLike = editable.closest(
+          '[data-testid*="composer"], [class*="composer"], [role="textbox"]',
+        );
+        if (composerLike instanceof HTMLElement && !isInsideToolboxPanelElement(composerLike)) {
+          return composerLike;
+        }
+        return editable.parentElement instanceof HTMLElement
+          && !isInsideToolboxPanelElement(editable.parentElement)
+            ? editable.parentElement
+            : editable;
+      }
+      return null;
+    }
+
+    function countComposerDomRemoveFileButtons() {
+      const root = getTrustedChatComposerAttachmentScanRoot();
+      if (!(root instanceof HTMLElement)) {
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLogIfChanged === 'function'
+        ) {
+          ToolboxShell.appendLogIfChanged(
+            'COMPOSER_DOM_REMOVE_SCAN_NO_ROOT',
+            'no-root',
+            '[COMPOSER][DOM_REMOVE_SCAN_NO_ROOT] count=0 reason=no-trusted-composer-root',
+            3000,
+          );
+        }
         return 0;
       }
       try {
-        return Array.from(document.querySelectorAll(
-          '[aria-label*="移除文件"], [aria-label*="Remove file"], [aria-label*="remove file"], [aria-label*="删除文件"]',
-        )).filter((node) => {
-          if (!(node instanceof Element)) return false;
-          const label = String(node.getAttribute('aria-label') || '');
-          if (/添加文件|Add file|Attach/i.test(label)) return false;
-          return true;
-        }).length;
-      } catch (err) {
-        console.error('[ChatGPT toolbox] composer attachment DOM scan failed', err);
+        const candidates = Array.from(root.querySelectorAll(
+          [
+            '[aria-label*="移除文件"]',
+            '[aria-label*="Remove file"]',
+            '[aria-label*="remove file"]',
+            '[aria-label*="删除文件"]',
+            '[data-testid*="remove"][data-testid*="file"]',
+            '[data-testid*="attachment"][data-testid*="remove"]',
+          ].join(','),
+        ));
+        let excludedToolboxCount = 0;
+        let excludedAttachButtonCount = 0;
+        const valid = candidates.filter((node) => {
+          if (!(node instanceof Element)) {
+            return false;
+          }
+          if (isInsideToolboxPanelElement(node)) {
+            excludedToolboxCount += 1;
+            return false;
+          }
+          const label = String(node.getAttribute('aria-label') || '').trim();
+          const testId = String(node.getAttribute('data-testid') || '').trim();
+          if (/添加文件|Add file|Attach|上传文件|Upload file/i.test(label)) {
+            excludedAttachButtonCount += 1;
+            return false;
+          }
+          const inTrustedRoot = root.contains(node);
+          if (!inTrustedRoot) {
+            return false;
+          }
+          return !!(
+            /移除文件|删除文件|Remove file|remove file/i.test(label)
+            || /remove.*file|file.*remove|attachment.*remove|remove.*attachment/i.test(testId)
+          );
+        });
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLogIfChanged === 'function'
+        ) {
+          ToolboxShell.appendLogIfChanged(
+            'COMPOSER_DOM_REMOVE_SCAN_SCOPED',
+            `${valid.length}|${candidates.length}|${excludedToolboxCount}|${excludedAttachButtonCount}`,
+            `[COMPOSER][DOM_REMOVE_SCAN_SCOPED] `
+              + `count=${valid.length} `
+              + `candidates=${candidates.length} `
+              + `excludedToolbox=${excludedToolboxCount} `
+              + `excludedAttachButton=${excludedAttachButtonCount} `
+              + `rootTag=${root.tagName || '-'}`,
+            1500,
+          );
+        }
+        return valid.length;
+      } catch (error) {
+        console.error('[COMPOSER][DOM_REMOVE_SCAN_FAILED]', error);
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLog === 'function'
+        ) {
+          ToolboxShell.appendLog(
+            `[COMPOSER][DOM_REMOVE_SCAN_FAILED] error=${
+              error && error.message ? error.message : String(error)
+            }`,
+          );
+        }
         return 0;
       }
     }
@@ -41982,7 +44541,22 @@
         )
       );
 
-      if (readyNow && domRemoveCount > 0) {
+      const moduleCountForSticky = Math.max(
+        0,
+        Number(
+          reconciled && (
+            reconciled._moduleFileCount != null
+              ? reconciled._moduleFileCount
+              : reconciled._moduleCountBeforeDom != null
+                ? reconciled._moduleCountBeforeDom
+                : reconciled.uniqueCount != null
+                  ? reconciled.uniqueCount
+                  : reconciled.attachmentCount
+          ),
+        ) || 0,
+      );
+
+      if (readyNow && domRemoveCount > 0 && moduleCountForSticky > 0) {
         reconciledComposerAttachmentSticky = reconciled;
         reconciledComposerAttachmentStickyAt = now;
         return reconciled;
@@ -41991,6 +44565,7 @@
       if (
         reconciledComposerAttachmentSticky
         && domRemoveCount > 0
+        && moduleCountForSticky > 0
         && !nativeUploading
         && (now - reconciledComposerAttachmentStickyAt) < RECONCILED_COMPOSER_ATTACHMENT_STICKY_MS
       ) {
@@ -42125,7 +44700,12 @@
         && typeof ComposerApi.isAttachmentStillUploading === 'function'
         && ComposerApi.isAttachmentStillUploading()
       );
-      const domWins = domRemoveCount > 0 && (moduleFileCount <= 0 || !snapshot.hasReady);
+      const domRemoveEvidenceTrusted = domRemoveCount > 0;
+      const domWins = !!(
+        domRemoveEvidenceTrusted
+        && domRemoveCount > 0
+        && (moduleFileCount <= 0 || !snapshot.hasReady)
+      );
       let reconciled = domWins
         ? {
           ...snapshot,
@@ -42158,7 +44738,12 @@
         : '-';
       if (domWins && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(
-          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] moduleCount=${moduleFileCount} domRemoveCount=${domRemoveCount} nativeUploading=${nativeUploading ? 1 : 0} reason=${reasonText}`,
+          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] `
+          + `moduleCount=${moduleFileCount} `
+          + `domRemoveCount=${domRemoveCount} `
+          + `domTrusted=${domRemoveEvidenceTrusted ? 1 : 0} `
+          + `nativeUploading=${nativeUploading ? 1 : 0} `
+          + `reason=${reasonText}`,
         );
       }
 
@@ -42226,10 +44811,23 @@
         filenames: Array.isArray(snap && snap.filenames) ? snap.filenames : [],
         source: unifiedSource,
       };
-      if (moduleCount !== fileCount && typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(
-          `[COMPOSER][ATTACHMENT_STATE_CONFLICT] reason=${reasonText} moduleCount=${moduleCount} unifiedCount=${fileCount} uploading=${uploading ? 1 : 0} ready=${ready ? 1 : 0} source=${unifiedSource}`,
-        );
+      if (moduleCount !== fileCount) {
+        const unifiedConflictSignature = `module=${moduleCount}|unified=${fileCount}|uploading=${uploading ? 1 : 0}|ready=${ready ? 1 : 0}|source=${unifiedSource}|reason=${reasonText}`;
+        const unifiedConflictLine = `[COMPOSER][ATTACHMENT_STATE_CONFLICT_DIAG] reason=${reasonText} moduleCount=${moduleCount} unifiedCount=${fileCount} uploading=${uploading ? 1 : 0} ready=${ready ? 1 : 0} source=${unifiedSource}`;
+        if (
+          typeof ToolboxShell !== 'undefined'
+          && ToolboxShell
+          && typeof ToolboxShell.appendLogIfChanged === 'function'
+        ) {
+          ToolboxShell.appendLogIfChanged(
+            'COMPOSER_ATTACHMENT_STATE_CONFLICT_UNIFIED',
+            unifiedConflictSignature,
+            unifiedConflictLine,
+            5000,
+          );
+        } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(unifiedConflictLine);
+        }
       }
       return unified;
     }
@@ -43879,6 +46477,16 @@
               `[PERF][renderUploadButtonsOnly:critical] cost=${costMs}ms scope=${renderScope} send=${scopeNeedsSendRefresh ? 1 : 0}`,
             );
           }
+          try {
+            bindCriticalUploadButtonDocumentFallback(`renderUploadButtonsOnly:critical:${renderReason}`);
+            bindCriticalUploadButtonDirectFallback(rootElRef || document, `renderUploadButtonsOnly:critical:${renderReason}`);
+          } catch (error) {
+            const errText = error && error.message ? error.message : String(error);
+            console.error('[CRITICAL_BUTTON_CLICK][RENDER_BIND_FAILED]', error);
+            ToolboxShell.appendLog(
+              `[CRITICAL_BUTTON_CLICK][RENDER_BIND_FAILED] reason=critical:${renderReason} error=${errText}`,
+            );
+          }
           return;
         }
 
@@ -44488,6 +47096,16 @@
         bindCopyLastMessageButton('after-render-upload-buttons');
         bindSendCopyHotkeyButton('after-render-upload-buttons');
         scheduleAuditToolboxActionGridLayout(renderReason);
+        try {
+          bindCriticalUploadButtonDocumentFallback(`renderUploadButtonsOnly:${renderReason}`);
+          bindCriticalUploadButtonDirectFallback(rootElRef || document, `renderUploadButtonsOnly:${renderReason}`);
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CRITICAL_BUTTON_CLICK][RENDER_BIND_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CRITICAL_BUTTON_CLICK][RENDER_BIND_FAILED] reason=${renderReason} error=${errText}`,
+          );
+        }
       } catch (err) {
         const errText = err && err.message ? err.message : String(err);
         console.error('[UPLOAD_RENDER][FAILED]', err);
@@ -48149,30 +50767,13 @@
         && !isSendCopyHotkeyComposite
       ) {
         ToolboxShell.appendLog(
-          `[SEND_MESSAGE][AUTHORITY_FAST_PATH] `
+          `[SEND_MESSAGE][AUTHORITY_FAST_PATH_DISABLED] `
           + `source=${logSource || '-'} `
           + `replyState=${authorityForSendClick.reply.state || '-'} `
           + `textLen=${authorityForSendClick.composer.textLen || 0} `
           + `hasPayload=${authorityForSendClick.composer.hasPayload ? 1 : 0} `
-          + `realSendReady=${authorityForSendClick.composer.realSendButtonReady ? 1 : 0}`,
-        );
-        const fastClicked = clickNativeSendButtonFromToolboxAuthority(authorityForSendClick, logSource);
-        if (fastClicked) {
-          setStatus('发送中', 'running');
-          setAuthoritativeSendTaskState(
-            {
-              phase: 'sending',
-              runId: Date.now(),
-              cancelRequested: false,
-              subphase: 'authority-fast-path-native-click',
-            },
-            'trigger-send:authority-fast-path',
-          );
-          scheduleRenderUpload('send-message:authority-native-click');
-          return true;
-        }
-        ToolboxShell.appendLog(
-          `[SEND_MESSAGE][AUTHORITY_FAST_PATH_FAILED_FALLBACK] source=${logSource || '-'}`,
+          + `realSendReady=${authorityForSendClick.composer.realSendButtonReady ? 1 : 0} `
+          + `action=delegate-shared-core reason=must-confirm-message-left-composer`,
         );
       }
 
@@ -56267,6 +58868,10 @@
           console.error('[ChatGPT toolbox] send-message busy precheck failed', err);
           ToolboxShell.appendLog(`[SEND_MESSAGE][BUSY_PRECHECK_FAILED] source=${src} error=${errText}`);
         }
+        const authority = getToolboxAuthorityState('send-message-click', {
+          force: true,
+        });
+
         if (responseState && responseState.is_responding) {
           const textLen = typeof ComposerApi.getComposerText === 'function'
             ? String(ComposerApi.getComposerText() || '').trim().length
@@ -56275,17 +58880,24 @@
             ? ComposerApi.getUniqueComposerAttachmentSnapshot({ reason: 'ui-click-assistant-busy' })
             : null;
           const attachmentCount = attachmentSnapshot ? Number(attachmentSnapshot.uniqueCount || 0) : 0;
+          const authorityReplyState = authority && authority.reply
+            ? String(authority.reply.state || '-')
+            : '-';
+          const authorityReady = authority && authority.flags
+            ? (authority.flags.canSend === true ? 1 : 0)
+            : -1;
           ToolboxShell.appendLog(
-            `[SEND_MESSAGE][ASSISTANT_BUSY_PRECHECK] hasPayload=${textLen > 0 || attachmentCount > 0 ? 1 : 0} textLen=${textLen} attachmentCount=${attachmentCount}`,
+            '[SEND_MESSAGE][ASSISTANT_BUSY_PRECHECK][DIAGNOSTIC_ONLY] '
+            + `hasPayload=${textLen > 0 || attachmentCount > 0 ? 1 : 0} `
+            + `textLen=${textLen} attachmentCount=${attachmentCount} `
+            + `detectResponding=1 `
+            + `authorityReplyState=${authorityReplyState} `
+            + `authorityReady=${authorityReady}`,
           );
         }
         ToolboxShell.appendLog(`[UPLOAD_UI_ACTION][send-message:trigger] source=${src} rawSource=${rawSource} phase=${triggerPhase}`);
         ToolboxShell.appendLog(`[SEND_MESSAGE][BUTTON_TRIGGER] source=${src} rawSource=${rawSource}`);
         ToolboxShell.appendLog(`[MESSAGE_SEND][CLICK] source=${src}`);
-
-        const authority = getToolboxAuthorityState('send-message-click', {
-          force: true,
-        });
 
         const canSendByAuthority = isToolboxAuthorityCanSendNow(authority);
 
@@ -56310,46 +58922,21 @@
           || String(rawSource || '').includes('button')
         );
 
-        const shouldUseAuthorityFastPath = !!(
+        if (
           isPlainManualSendMessageClick
           && canSendByAuthority
           && !(ctx && ctx.parentAction)
           && !(ctx && ctx.compositeAction)
-        );
-
-        if (shouldUseAuthorityFastPath) {
+        ) {
           ToolboxShell.appendLog(
-            `[SEND_MESSAGE][AUTHORITY_FAST_PATH] `
+            `[SEND_MESSAGE][UI_FAST_PATH_DISABLED] `
             + `source=${src || '-'} `
-            + `replyState=${authority.reply.state || '-'} `
-            + `textLen=${authority.composer.textLen || 0} `
-            + `hasPayload=${authority.composer.hasPayload ? 1 : 0} `
-            + `realSendReady=${authority.composer.realSendButtonReady ? 1 : 0}`,
-          );
-
-          const clicked = clickNativeSendButtonFromToolboxAuthority(
-            authority,
-            'send-message-button',
-          );
-
-          if (clicked) {
-            setStatus('发送中', 'running');
-            setAuthoritativeSendTaskState(
-              {
-                phase: 'sending',
-                runId: Date.now(),
-                cancelRequested: false,
-                subphase: 'authority-fast-path-native-click',
-              },
-              'send-message:authority-fast-path',
-            );
-
-            scheduleRenderUpload('send-message:authority-fast-path-clicked');
-            return true;
-          }
-
-          ToolboxShell.appendLog(
-            `[SEND_MESSAGE][AUTHORITY_FAST_PATH_FAILED_FALLBACK] source=${src || '-'}`,
+            + `rawSource=${rawSource || '-'} `
+            + `replyState=${authority && authority.reply ? authority.reply.state || '-' : '-'} `
+            + `textLen=${authority && authority.composer ? authority.composer.textLen || 0 : 0} `
+            + `hasPayload=${authority && authority.composer && authority.composer.hasPayload ? 1 : 0} `
+            + `realSendReady=${authority && authority.composer && authority.composer.realSendButtonReady ? 1 : 0} `
+            + `action=delegate-triggerSendFromToolbox reason=must-use-shared-send-core`,
           );
         }
 
@@ -56362,9 +58949,13 @@
 
         if (canPaintImmediately) {
           const normalizedSrc = normalizeSendMessageSource(src, 'send-message');
-          if (isManualSendMessageSource(normalizedSrc) && !sendMessageTaskState.running) {
-            startSendMessageTask(`send-message:manual-click-immediate:${normalizedSrc}`, 'send-message');
-          }
+          ToolboxShell.appendLog(
+            `[SEND_MESSAGE][IMMEDIATE_PAINT_ONLY] `
+            + `source=${src || '-'} `
+            + `normalizedSource=${normalizedSrc || '-'} `
+            + `phase=${phaseNow || '-'} `
+            + `reason=no-prestart-send-task-shared-core-will-own-task`,
+          );
           paintSendMessageButtonWaitingImmediately(`send-message:manual-click-immediate:${src}`);
         }
 
@@ -56482,7 +59073,24 @@
       },
       'loop-copy-hotkey-continue': (ctx) => {
         const src = ctx && ctx.source ? ctx.source : 'unknown';
-        void handleCopyHotkeyContinueLoopClick(src);
+        const button = ctx && ctx.button instanceof HTMLElement ? ctx.button : null;
+        ToolboxShell.appendLog(
+          `[COPY_HOTKEY_CONTINUE_LOOP][CLICK_ACCEPTED] `
+          + `source=${src || '-'} `
+          + `buttonId=${button ? (button.id || '-') : '-'} `
+          + `disabled=${button && button.disabled ? 1 : 0} `
+          + `dataAction=${button && button.dataset ? (button.dataset.action || '-') : '-'} `
+          + `baseAction=${button && button.dataset ? (button.dataset.cgptBaseAction || '-') : '-'} `
+          + `runtimeAction=${button && button.dataset ? (button.dataset.cgptRuntimeAction || button.dataset.cgptButtonAction || '-') : '-'}`
+        );
+        void handleCopyHotkeyContinueLoopClick(src).catch((err) => {
+          const errText = formatToolboxError(err);
+          console.error('[UPLOAD_UI_ACTION][loop-copy-hotkey-continue:failed]', err);
+          ToolboxShell.appendLog(
+            `[UPLOAD_UI_ACTION][loop-copy-hotkey-continue:failed] source=${src || '-'} error=${errText}`
+          );
+          setStatus(`无限连续复制+快捷键+继续失败：${errText}`, 'error');
+        });
         return true;
       },
       [CLOSED_LOOP_ACTIONS.WITH_HOTKEY.action]: (ctx) => {
@@ -56682,6 +59290,369 @@
           );
         }
       }
+    }
+
+    const CRITICAL_UPLOAD_BUTTON_IDS = Object.freeze({
+      startUpload: 'cgpt-upload-start',
+      autoqStartUpload: 'cgpt-autoq-start-upload',
+      closedLoopEveryRound: 'cgpt-closed-loop-upload-every-round-hotkey-btn',
+      autoqClosedLoopEveryRound: 'cgpt-autoq-closed-loop-upload-every-round-hotkey-btn',
+      closedLoopEvery5Hotkey: 'cgpt-closed-loop-upload-every5-hotkey-btn',
+      autoqClosedLoopEvery5Hotkey: 'cgpt-autoq-closed-loop-upload-every5-hotkey-btn',
+      closedLoopEvery5Direct: 'cgpt-closed-loop-upload-every5-btn',
+      autoqClosedLoopEvery5Direct: 'cgpt-autoq-closed-loop-upload-every5-btn',
+      sendCopyHotkey: 'cgpt-send-copy-hotkey-once',
+      sendMessage: 'cgpt-send-message-once',
+      copyHotkeyOnce: 'cgpt-copy-hotkey-once',
+      copyHotkeyContinueOnce: 'cgpt-copy-hotkey-continue-once',
+      copyHotkeyContinueLoop: 'cgpt-copy-hotkey-continue-loop',
+      copyContinue: 'cgpt-upload-continue-once',
+      autoContinueOnce: 'cgpt-auto-continue-once',
+      autoContinueUntilDone: 'cgpt-auto-continue-until-done',
+    });
+
+    function getCriticalUploadButtonAction(btn) {
+      if (!(btn instanceof HTMLElement)) {
+        return '';
+      }
+      const id = String(btn.id || '').trim();
+      const dataAction = String(btn.dataset.action || '').trim();
+      const baseAction = String(btn.dataset.cgptBaseAction || '').trim();
+      const runtimeAction = String(
+        btn.dataset.cgptRuntimeAction
+        || btn.dataset.cgptButtonAction
+        || '',
+      ).trim();
+      if (
+        id === CRITICAL_UPLOAD_BUTTON_IDS.startUpload
+        || id === CRITICAL_UPLOAD_BUTTON_IDS.autoqStartUpload
+      ) {
+        return 'start-upload';
+      }
+      if (
+        id === CRITICAL_UPLOAD_BUTTON_IDS.closedLoopEveryRound
+        || id === CRITICAL_UPLOAD_BUTTON_IDS.autoqClosedLoopEveryRound
+      ) {
+        return 'closed-loop-with-hotkey-upload-every-round';
+      }
+      if (
+        id === CRITICAL_UPLOAD_BUTTON_IDS.closedLoopEvery5Hotkey
+        || id === CRITICAL_UPLOAD_BUTTON_IDS.autoqClosedLoopEvery5Hotkey
+      ) {
+        return 'closed-loop-with-hotkey';
+      }
+      if (
+        id === CRITICAL_UPLOAD_BUTTON_IDS.closedLoopEvery5Direct
+        || id === CRITICAL_UPLOAD_BUTTON_IDS.autoqClosedLoopEvery5Direct
+      ) {
+        return 'closed-loop-without-hotkey';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.sendCopyHotkey) {
+        return 'send-copy-hotkey';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.sendMessage) {
+        return 'send-message';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.copyHotkeyOnce) {
+        return 'copy-and-hotkey';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.copyHotkeyContinueOnce) {
+        return 'copy-hotkey-continue';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.copyHotkeyContinueLoop) {
+        return 'loop-copy-hotkey-continue';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.copyContinue) {
+        return 'copy-and-continue';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.autoContinueOnce) {
+        return 'auto-continue';
+      }
+      if (id === CRITICAL_UPLOAD_BUTTON_IDS.autoContinueUntilDone) {
+        return 'auto-continue-until-done';
+      }
+      return runtimeAction || baseAction || dataAction;
+    }
+
+    function isCriticalUploadButton(btn) {
+      if (!(btn instanceof HTMLElement)) {
+        return false;
+      }
+      const action = getCriticalUploadButtonAction(btn);
+      if (!action) {
+        return false;
+      }
+      return (
+        action === 'start-upload'
+        || action === 'send-message'
+        || action === 'send-copy-hotkey'
+        || action === 'copy-and-hotkey'
+        || action === 'copy-hotkey-continue'
+        || action === 'loop-copy-hotkey-continue'
+        || action === 'copy-and-continue'
+        || action === 'auto-continue'
+        || action === 'auto-continue-until-done'
+        || action === 'closed-loop-with-hotkey'
+        || action === 'closed-loop-with-hotkey-upload-every-round'
+        || action === 'closed-loop-without-hotkey'
+      );
+    }
+
+    function getCriticalUploadButtonFromEvent(event) {
+      if (!event) {
+        return null;
+      }
+      let target = event.target instanceof Element ? event.target : null;
+      if (
+        (!target || !target.closest)
+        && Number.isFinite(event.clientX)
+        && Number.isFinite(event.clientY)
+      ) {
+        const pointEl = document.elementFromPoint(event.clientX, event.clientY);
+        if (pointEl instanceof Element) {
+          target = pointEl;
+        }
+      }
+      if (!(target instanceof Element) || typeof target.closest !== 'function') {
+        return null;
+      }
+      const btn = target.closest([
+        '#cgpt-upload-start',
+        '#cgpt-autoq-start-upload',
+        '#cgpt-closed-loop-upload-every-round-hotkey-btn',
+        '#cgpt-autoq-closed-loop-upload-every-round-hotkey-btn',
+        '#cgpt-closed-loop-upload-every5-hotkey-btn',
+        '#cgpt-autoq-closed-loop-upload-every5-hotkey-btn',
+        '#cgpt-closed-loop-upload-every5-btn',
+        '#cgpt-autoq-closed-loop-upload-every5-btn',
+        '#cgpt-send-copy-hotkey-once',
+        '#cgpt-send-message-once',
+        '#cgpt-copy-hotkey-once',
+        '#cgpt-copy-hotkey-continue-once',
+        '#cgpt-copy-hotkey-continue-loop',
+        '#cgpt-upload-continue-once',
+        '#cgpt-auto-continue-once',
+        '#cgpt-auto-continue-until-done',
+        '[data-action="start-upload"]',
+        '[data-action="closed-loop-with-hotkey-upload-every-round"]',
+        '[data-action="closed-loop-with-hotkey"]',
+        '[data-action="closed-loop-without-hotkey"]',
+        '[data-action="send-copy-hotkey"]',
+        '[data-action="send-message"]',
+        '[data-action="copy-and-hotkey"]',
+        '[data-action="copy-hotkey-continue"]',
+        '[data-action="loop-copy-hotkey-continue"]',
+        '[data-action="copy-and-continue"]',
+        '[data-action="auto-continue"]',
+        '[data-action="auto-continue-until-done"]',
+        '[data-cgpt-base-action="start-upload"]',
+        '[data-cgpt-base-action="closed-loop-with-hotkey-upload-every-round"]',
+        '[data-cgpt-base-action="closed-loop-with-hotkey"]',
+        '[data-cgpt-base-action="closed-loop-without-hotkey"]',
+        '[data-cgpt-base-action="send-copy-hotkey"]',
+        '[data-cgpt-base-action="send-message"]',
+        '[data-cgpt-base-action="copy-and-hotkey"]',
+        '[data-cgpt-base-action="copy-hotkey-continue"]',
+        '[data-cgpt-base-action="loop-copy-hotkey-continue"]',
+        '[data-cgpt-base-action="copy-and-continue"]',
+        '[data-cgpt-base-action="auto-continue"]',
+        '[data-cgpt-base-action="auto-continue-until-done"]',
+      ].join(','));
+      return btn instanceof HTMLElement && isCriticalUploadButton(btn) ? btn : null;
+    }
+
+    function logCriticalUploadButtonClickAudit(btn, event, source) {
+      if (!(btn instanceof HTMLElement)) {
+        return;
+      }
+      const rect = btn.getBoundingClientRect();
+      const topEl = (
+        event
+        && Number.isFinite(event.clientX)
+        && Number.isFinite(event.clientY)
+      )
+        ? document.elementFromPoint(event.clientX, event.clientY)
+        : null;
+      const action = getCriticalUploadButtonAction(btn);
+      ToolboxShell.appendLog(
+        `[CRITICAL_BUTTON_CLICK][AUDIT] `
+        + `source=${source || '-'} `
+        + `id=${btn.id || '-'} `
+        + `action=${action || '-'} `
+        + `dataAction=${btn.dataset.action || '-'} `
+        + `baseAction=${btn.dataset.cgptBaseAction || '-'} `
+        + `runtimeAction=${btn.dataset.cgptRuntimeAction || btn.dataset.cgptButtonAction || '-'} `
+        + `disabled=${btn.disabled ? 1 : 0} `
+        + `handledUpload=${event && event.cgptUploadUiActionHandled ? 1 : 0} `
+        + `handledClosedLoop=${event && event.cgptClosedLoopHandled ? 1 : 0} `
+        + `rect=${Math.round(rect.left)}/${Math.round(rect.top)}/${Math.round(rect.width)}/${Math.round(rect.height)} `
+        + `pointer=${event && Number.isFinite(event.clientX) ? event.clientX : -1}/${event && Number.isFinite(event.clientY) ? event.clientY : -1} `
+        + `topId=${topEl && topEl.id ? topEl.id : '-'} `
+        + `topTag=${topEl && topEl.tagName ? topEl.tagName : '-'} `
+        + `topClass=${topEl && topEl.className ? String(topEl.className).slice(0, 120) : '-'}`,
+      );
+    }
+
+    function dispatchCriticalUploadButtonAction(btn, event, source = 'critical-click-fallback') {
+      if (!(btn instanceof HTMLElement)) {
+        return false;
+      }
+      const action = getCriticalUploadButtonAction(btn);
+      if (!action) {
+        ToolboxShell.appendLog(
+          `[CRITICAL_BUTTON_CLICK][SKIP] source=${source || '-'} reason=empty-action id=${btn.id || '-'}`,
+        );
+        return false;
+      }
+      logCriticalUploadButtonClickAudit(btn, event, source);
+      if (event && event.cgptUploadUiActionHandled) {
+        ToolboxShell.appendLog(
+          `[CRITICAL_BUTTON_CLICK][SKIP] source=${source || '-'} action=${action} id=${btn.id || '-'} reason=already-upload-handled`,
+        );
+        return true;
+      }
+      if (event && event.cgptClosedLoopHandled) {
+        ToolboxShell.appendLog(
+          `[CRITICAL_BUTTON_CLICK][SKIP] source=${source || '-'} action=${action} id=${btn.id || '-'} reason=already-closed-loop-handled`,
+        );
+        return true;
+      }
+      if (btn.disabled) {
+        ToolboxShell.appendLog(
+          `[CRITICAL_BUTTON_CLICK][SKIP] source=${source || '-'} action=${action} id=${btn.id || '-'} reason=button-disabled`,
+        );
+        return true;
+      }
+      if (event) {
+        event.cgptUploadUiActionHandled = true;
+        if (
+          action === 'closed-loop-with-hotkey'
+          || action === 'closed-loop-with-hotkey-upload-every-round'
+          || action === 'closed-loop-without-hotkey'
+        ) {
+          event.cgptClosedLoopHandled = true;
+        }
+        if (typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+      }
+      ToolboxShell.appendLog(
+        `[CRITICAL_BUTTON_CLICK][DISPATCH] source=${source || '-'} id=${btn.id || '-'} action=${action}`,
+      );
+      if (
+        action === 'closed-loop-with-hotkey'
+        || action === 'closed-loop-with-hotkey-upload-every-round'
+        || action === 'closed-loop-without-hotkey'
+      ) {
+        void dispatchClosedLoopAction(action, `critical-button:${source || 'click'}`).catch((error) => {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CRITICAL_BUTTON_CLICK][CLOSED_LOOP_DISPATCH_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CRITICAL_BUTTON_CLICK][CLOSED_LOOP_DISPATCH_FAILED] action=${action} error=${errText}`,
+          );
+          setStatus(`闭环启动失败：${errText}`, 'error');
+        });
+        return true;
+      }
+      if (action === 'start-upload') {
+        ToolboxShell.appendLog('[UPLOAD_CLICK][START] source=critical-button-fallback');
+        ToolboxShell.appendLog('[UPLOAD_UI_ACTION][hit] action=start-upload source=critical-button-fallback');
+        void runStartUploadButtonCore({
+          source: 'manual-start-upload',
+          preserveFiles: true,
+          reason: `critical-button:${source || 'click'}`,
+        }).catch((error) => {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CRITICAL_BUTTON_CLICK][START_UPLOAD_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CRITICAL_BUTTON_CLICK][START_UPLOAD_FAILED] error=${errText}`,
+          );
+          setStatus(`上传失败：${errText}`, 'error');
+        });
+        return true;
+      }
+      return runUploadUiAction(action, btn, `critical-button:${source || 'click'}`, null);
+    }
+
+    let criticalUploadButtonDocumentFallbackBound = false;
+
+    function bindCriticalUploadButtonDocumentFallback(reason = '') {
+      if (criticalUploadButtonDocumentFallbackBound) {
+        ToolboxShell.appendLogIfChanged(
+          'CRITICAL_BUTTON_DOCUMENT_FALLBACK_KEEP',
+          `keep|${reason || '-'}`,
+          `[CRITICAL_BUTTON_CLICK][DOCUMENT_FALLBACK_KEEP] reason=${reason || '-'}`,
+          3000,
+        );
+        return;
+      }
+      criticalUploadButtonDocumentFallbackBound = true;
+      document.addEventListener('click', (event) => {
+        const btn = getCriticalUploadButtonFromEvent(event);
+        if (!(btn instanceof HTMLElement)) {
+          return;
+        }
+        dispatchCriticalUploadButtonAction(btn, event, 'document-bubble-fallback');
+      }, false);
+      ToolboxShell.appendLog(
+        `[CRITICAL_BUTTON_CLICK][DOCUMENT_FALLBACK_BOUND] reason=${reason || '-'}`,
+      );
+    }
+
+    function bindCriticalUploadButtonDirectFallback(root, reason = '') {
+      const scope = root instanceof HTMLElement ? root : document;
+      const selectors = [
+        '#cgpt-upload-start',
+        '#cgpt-autoq-start-upload',
+        '#cgpt-closed-loop-upload-every-round-hotkey-btn',
+        '#cgpt-autoq-closed-loop-upload-every-round-hotkey-btn',
+        '#cgpt-closed-loop-upload-every5-hotkey-btn',
+        '#cgpt-autoq-closed-loop-upload-every5-hotkey-btn',
+        '#cgpt-closed-loop-upload-every5-btn',
+        '#cgpt-autoq-closed-loop-upload-every5-btn',
+        '#cgpt-send-copy-hotkey-once',
+        '#cgpt-send-message-once',
+        '#cgpt-copy-hotkey-once',
+        '#cgpt-copy-hotkey-continue-once',
+        '#cgpt-copy-hotkey-continue-loop',
+        '#cgpt-upload-continue-once',
+        '#cgpt-auto-continue-once',
+        '#cgpt-auto-continue-until-done',
+      ];
+      let boundCount = 0;
+      selectors.forEach((selector) => {
+        const nodes = Array.from(scope.querySelectorAll(selector));
+        nodes.forEach((node) => {
+          if (!(node instanceof HTMLElement)) {
+            return;
+          }
+          if (!isCriticalUploadButton(node)) {
+            return;
+          }
+          const action = getCriticalUploadButtonAction(node);
+          node.dataset.cgptCriticalAction = action;
+          if (node.dataset.cgptCriticalClickFallbackBound === '1') {
+            return;
+          }
+          node.dataset.cgptCriticalClickFallbackBound = '1';
+          node.addEventListener('click', (event) => {
+            if (event && (event.cgptUploadUiActionHandled || event.cgptClosedLoopHandled)) {
+              ToolboxShell.appendLog(
+                `[CRITICAL_BUTTON_CLICK][DIRECT_SKIP] id=${node.id || '-'} action=${action || '-'} reason=already-handled`,
+              );
+              return;
+            }
+            dispatchCriticalUploadButtonAction(node, event, 'direct-fallback');
+          }, false);
+          boundCount += 1;
+        });
+      });
+      ToolboxShell.appendLog(
+        `[CRITICAL_BUTTON_CLICK][DIRECT_FALLBACK_BIND] reason=${reason || '-'} bound=${boundCount}`,
+      );
     }
 
     function runUploadUiAction(action, button, source, event) {
@@ -57266,15 +60237,14 @@
         );
 
         if (switchResult && switchResult.sawButtonDuringAttempts === false) {
-          console.warn('[TOOLBOX][GO_HOME] 未找到新聊天按钮，回退到 /');
-          ToolboxShell.appendLog('[HOME][NEW_CHAT_BUTTON_MISSING]');
-          setStatus('未找到新聊天按钮，已尝试回到首页', 'warn');
-          if (typeof location !== 'undefined' && typeof location.assign === 'function') {
-            location.assign('/');
-          }
+          console.warn('[TOOLBOX][GO_HOME] 未找到新聊天按钮，已阻止整页刷新兜底');
+          ToolboxShell.appendLog(
+            `[HOME][NEW_CHAT_BUTTON_MISSING] source=${src} action=block-location-assign reason=spa-only`,
+          );
+          setStatus('未找到站内新聊天入口，已阻止整页刷新', 'error');
           return {
             ok: false,
-            reason: 'new_chat_button_not_found',
+            reason: 'new_chat_button_not_found_spa_only',
             beforeKey,
             afterKey,
           };
@@ -58279,6 +61249,19 @@
       ToolboxShell.appendLog(
         `[UPLOAD_UI_ACTION][BIND_OK] source=root-delegated-click rootChanged=${rootChanged ? 1 : 0}`,
       );
+      bindCriticalUploadButtonDocumentFallback('bindUploadDelegatedClick');
+      bindCriticalUploadButtonDirectFallback(rootEl, 'bindUploadDelegatedClick');
+      window.setTimeout(() => {
+        try {
+          bindCriticalUploadButtonDirectFallback(rootEl, 'bindUploadDelegatedClick:late-0');
+        } catch (error) {
+          const errText = error && error.message ? error.message : String(error);
+          console.error('[CRITICAL_BUTTON_CLICK][BIND_UPLOAD_LATE_FAILED]', error);
+          ToolboxShell.appendLog(
+            `[CRITICAL_BUTTON_CLICK][BIND_UPLOAD_LATE_FAILED] error=${errText}`,
+          );
+        }
+      }, 0);
     }
 
     function requireUploadElement(rootEl, selector, name) {
@@ -59761,6 +62744,13 @@
           ToolboxShell.appendLog(
             `[UPLOAD_INIT][READY_REFRESH_BUTTONS] moduleReady=1 moduleInitState=${state.moduleInitState} activeFiles=${getActiveGroupFiles().length}`,
           );
+          const restoredClosedLoopStartPending = restoreClosedLoopStartPendingIfNeeded(`upload-init-ready:${reason || '-'}`);
+          if (restoredClosedLoopStartPending) {
+            ToolboxShell.appendLog(
+              `[CLOSED_LOOP][START_PENDING_RESTORE_ON_INIT] reason=${reason || '-'}`,
+            );
+            void flushClosedLoopStartPendingIfReady(`upload-init-ready:${reason || '-'}`);
+          }
           appendUploadGroupLog('INIT', { stage: 'pipeline-complete', reason: reason || '-' });
         })
         .catch((err) => {
@@ -60601,6 +63591,7 @@
           }
           updateChatInputStateBadge();
           syncClosedLoopRoundWithTurnCount('bridge-poll');
+          maybePauseClosedLoopForBridgeOffline('bridge-poll');
           recoverClosedLoopIdleRunningState('bridge-poll');
         };
 
@@ -60664,6 +63655,13 @@
         reconcileManualComposerAttachmentClear('foreground-resume');
         if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
           ToolboxShell.appendLog(`[UPLOAD][FOREGROUND_RESUME] reason=${tag}`);
+        }
+        const restoredClosedLoopStartPendingOnForeground = restoreClosedLoopStartPendingIfNeeded(`foreground-resume:${tag}`);
+        if (restoredClosedLoopStartPendingOnForeground) {
+          ToolboxShell.appendLog(
+            `[CLOSED_LOOP][START_PENDING_RESTORE_ON_FOREGROUND] reason=${tag}`,
+          );
+          void flushClosedLoopStartPendingIfReady(`foreground-resume:${tag}`);
         }
         if (typeof updateChatInputStateBadge === 'function') {
           reconcilePendingSendTaskAfterExternalNativeSend('updateChatInputStateBadge');

@@ -34,7 +34,7 @@ cd chatgpt-toolbox && npm run build --silent
 1. 按 `FILE:` 分隔符还原临时文件树（或直接在合并文本内按路径检索）。
 2. 以合并文本中列出的**各文件内容**判断死活，勿把「单个 txt」当成项目结构。
 3. 合并导出**不应**包含 `__pycache__/`、`*.pyc`；当前复核过的导出快照（如 `0_merged_for_chatgpt(434).zip` 还原后）通常**没有**这些路径——勿写成「当前包里包含 pyc」。若将来导出出现 pyc，视为导出污染，从工作区删除并确认 `.gitignore` 含 `__pycache__/`、`*.pyc`（`export_for_chatgpt.py` 默认已排除）。
-4. 合并导出通常**不收录** `client.user.js`、`chatgpt-toolbox/dist/client.user.js`；缺失正常。油猴逻辑以 `tampermonkey-userscript-src/` 为准，需要产物时本地 `npm run build`。
+4. 合并导出**不收录** `client.user.js`、`chatgpt-toolbox/dist/client.user.js`；缺失正常。油猴逻辑以 `tampermonkey-userscript-src/` 为准；根目录 `client.user.js` 由 **Git 提交**跟踪（`npm run build` 后提交），便于按提交恢复 Tampermonkey 单文件。
 
 ### 0.2 静态 import 图：不可误删的模块
 
@@ -803,7 +803,7 @@ python tools/find_dead_artifact_files.py
 
 - **`client.user.js`**、**`chatgpt-toolbox/dist/client.user.js`**：由 `npm run build` 生成；不能作为源码级修改入口；不能因导出快照缺失而判 dead code 删除。
 - 源码审查对象是 `chatgpt-toolbox/tampermonkey-userscript-src/`；需要安装/回归时在本地构建后使用产物。
-- 本仓库 `.gitignore` 已忽略 `client.user.js` 与 `chatgpt-toolbox/dist/`（不提交生成物，避免与源码 diff 混淆）；Tampermonkey 安装请使用本地 `npm run build` 后的 `dist/client.user.js`。
+- 本仓库 **Git 跟踪**根目录 `client.user.js`（`npm run build` 后随提交备份）；`.gitignore` 仍忽略 `chatgpt-toolbox/dist/`。合并导出不收录 `client.user.js`。Tampermonkey 安装请使用本地 `npm run build` 后的 `dist/client.user.js` 或根目录同步副本。
 
 ### 17.4 需要人工确认的类型
 

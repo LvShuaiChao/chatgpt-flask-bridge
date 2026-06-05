@@ -32,6 +32,33 @@
         }
       }
 
+      function readSendFlowAuthoritySnapshot(source) {
+        const reason = `upload-send-flow:${source || '-'}`;
+        try {
+          if (
+            typeof window !== 'undefined'
+            && window.ToolboxButtonState
+            && typeof window.ToolboxButtonState.resolveButtonAuthoritySnapshot === 'function'
+          ) {
+            return window.ToolboxButtonState.resolveButtonAuthoritySnapshot(reason);
+          }
+          if (
+            typeof ButtonState !== 'undefined'
+            && ButtonState
+            && typeof ButtonState.resolveButtonAuthoritySnapshot === 'function'
+          ) {
+            return ButtonState.resolveButtonAuthoritySnapshot(reason);
+          }
+        } catch (error) {
+          console.error('[UPLOAD_SEND_FLOW][AUTHORITY_READ_FAILED]', error);
+          appendSendLog(
+            `[UPLOAD_SEND_FLOW][AUTHORITY_READ_FAILED] source=${source || '-'} `
+            + `error=${error && error.message ? error.message : String(error)}`,
+          );
+        }
+        return null;
+      }
+
       async function candidateSendCurrentComposerMessage(sourceOrOptions) {
         const options = sourceOrOptions && typeof sourceOrOptions === 'object'
           ? sourceOrOptions
@@ -40,23 +67,60 @@
 
         appendSendLog(`[UPLOAD_SEND_FLOW][START] candidate=1 source=${source}`);
 
-        const capability = typeof getPageCapability === 'function'
-          ? getPageCapability('send-flow')
-          : null;
-        if (capability && capability.sendable === false) {
+        const authoritySnapshot = readSendFlowAuthoritySnapshot(source);
+        if (authoritySnapshot) {
           appendSendLog(
-            `[UPLOAD_SEND_FLOW][BLOCKED_NOT_SENDABLE] source=${source} responseState=${capability.response_state || '-'} reason=${capability.response_state_reason || '-'}`,
+            `[UPLOAD_SEND_FLOW][AUTHORITY_USED] source=${source} `
+            + `sendable=${authoritySnapshot.sendable ? 1 : 0} `
+            + `inputable=${authoritySnapshot.inputable ? 1 : 0} `
+            + `replyBusy=${authoritySnapshot.replyBusy ? 1 : 0} `
+            + `taskBusy=${authoritySnapshot.taskBusy ? 1 : 0} `
+            + `pendingSend=${authoritySnapshot.pendingSend ? 1 : 0} `
+            + `sendPhase=${authoritySnapshot.sendPhase || '-'} `
+            + `disabledReason=${authoritySnapshot.disabledReason || '-'}`,
           );
-          if (typeof setStatus === 'function') {
-            setStatus('当前页面不可发送，等待回复结束或输入框恢复', 'warn');
+          if (authoritySnapshot.sendable === false) {
+            appendSendLog(
+              `[UPLOAD_SEND_FLOW][BLOCKED_BY_AUTHORITY] source=${source} `
+              + `responseState=${authoritySnapshot.responseState || '-'} `
+              + `sendPhase=${authoritySnapshot.sendPhase || '-'} `
+              + `reason=${authoritySnapshot.disabledReason || '-'}`,
+            );
+            if (typeof setStatus === 'function') {
+              setStatus('当前页面不可发送，等待回复结束或输入框恢复', 'warn');
+            }
+            if (typeof renderUploadButtonsOnly === 'function') {
+              renderUploadButtonsOnly('send-flow:authority-not-sendable');
+            }
+            return {
+              ok: false,
+              reason: authoritySnapshot.disabledReason || 'not_sendable',
+            };
           }
-          if (typeof renderUploadButtonsOnly === 'function') {
-            renderUploadButtonsOnly('send-flow:not-sendable');
+        } else {
+          appendSendLog(
+            `[UPLOAD_SEND_FLOW][AUTHORITY_MISSING_FALLBACK_CAPABILITY] source=${source}`,
+          );
+          const capability = typeof getPageCapability === 'function'
+            ? getPageCapability('send-flow:fallback')
+            : null;
+          if (capability && capability.sendable === false) {
+            appendSendLog(
+              `[UPLOAD_SEND_FLOW][BLOCKED_NOT_SENDABLE_FALLBACK] source=${source} `
+              + `responseState=${capability.response_state || '-'} `
+              + `reason=${capability.response_state_reason || '-'}`,
+            );
+            if (typeof setStatus === 'function') {
+              setStatus('当前页面不可发送，等待回复结束或输入框恢复', 'warn');
+            }
+            if (typeof renderUploadButtonsOnly === 'function') {
+              renderUploadButtonsOnly('send-flow:fallback-not-sendable');
+            }
+            return {
+              ok: false,
+              reason: 'not_sendable',
+            };
           }
-          return {
-            ok: false,
-            reason: 'not_sendable',
-          };
         }
 
         const text = typeof getComposerText === 'function'

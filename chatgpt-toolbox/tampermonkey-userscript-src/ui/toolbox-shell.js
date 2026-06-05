@@ -1506,9 +1506,35 @@
           visibility: hidden;
         }
 
-        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"].is-hidden-placeholder {
-          display: none;
-          visibility: hidden;
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"].is-hidden-placeholder,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"][data-alert-hidden="1"],
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"].cgpt-top-status-empty {
+          display: none !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          max-width: 0 !important;
+          flex: 0 0 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          border: 0 !important;
+          background: transparent !important;
+        }
+
+        #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-top-status-slot="alert-state"].cgpt-top-status-empty,
+        #${APP.panelId} .cgpt-top-status-row .cgpt-toolbox-top-status-badge[data-top-status-slot="alert-state"].cgpt-top-status-empty,
+        #${APP.panelId} .cgpt-toolbox-header-status-row.cgpt-top-status-row [data-top-status-slot="alert-state"].cgpt-top-status-empty {
+          display: none !important;
+          visibility: hidden !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          max-width: 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          border-width: 0 !important;
+          background: transparent !important;
+          pointer-events: none !important;
         }
 
         #${APP.panelId} .cgpt-top-status-row .cgpt-top-status-badge[data-variant="ok"],
@@ -1832,12 +1858,24 @@
           color: #cbd5e1;
         }
 
-        .cgpt-toolbox-status-badge.cgpt-status-hidden {
+        .cgpt-toolbox-status-badge.cgpt-status-hidden,
+        .cgpt-toolbox-status-badge:empty {
           display: none !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          padding: 0 !important;
+          border: 0 !important;
+          background: transparent !important;
         }
 
-        #cgpt-toolbox-status-badge.cgpt-status-hidden {
+        #cgpt-toolbox-status-badge.cgpt-status-hidden,
+        #cgpt-toolbox-status-badge:empty {
           display: none !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          padding: 0 !important;
+          border: 0 !important;
+          background: transparent !important;
         }
 
         #cgpt-prompt-status:empty {
@@ -12651,12 +12689,19 @@
       if (!value) {
         return false;
       }
-      if (level === 'error') {
-        return true;
+      /*
+       * 显式 warn / warning 永远按“警告”处理。
+       *
+       * 例如：
+       *   继续指令发送失败：输入框内容校验失败，已暂停，禁止空转
+       *
+       * 这类文案虽然包含“失败”，但调用方明确传入 warn，语义是暂停提醒，
+       * 不能升级成顶部红色“报错”。
+       */
+      if (level === 'warn' || level === 'warning') {
+        return false;
       }
-      if (
-        /失败|错误|异常|报错|崩溃|初始化失败|上传失败|发送失败|复制失败|执行失败|运行失败|解析失败|JSONDecodeError|Traceback|Exception|Error|Failed|Fatal|Crash/i.test(value)
-      ) {
+      if (level === 'error') {
         return true;
       }
       if (
@@ -12664,6 +12709,12 @@
         && /失败|错误|异常|报错|超时|无法|不可用|未找到|拒绝|中断|断开|timeout|failed|error|exception|unavailable|not found|denied/i.test(value)
       ) {
         return true;
+      }
+      /*
+       * 没有明确 level 的 legacy 状态，才允许通过关键词推断为 error。
+       */
+      if (!level || level === 'idle' || level === 'unknown') {
+        return /失败|错误|异常|报错|崩溃|初始化失败|上传失败|发送失败|复制失败|执行失败|运行失败|解析失败|JSONDecodeError|Traceback|Exception|Error|Failed|Fatal|Crash/i.test(value);
       }
       return false;
     }
@@ -12865,10 +12916,20 @@
         return;
       }
 
-      badge.classList.add('cgpt-status-hidden');
       badge.textContent = '';
       badge.title = '';
+      badge.classList.add('cgpt-status-hidden');
+      badge.classList.remove(
+        'cgpt-status-warn',
+        'cgpt-status-error',
+        'cgpt-status-danger',
+      );
       badge.style.display = 'none';
+      badge.style.width = '0';
+      badge.style.minWidth = '0';
+      badge.style.padding = '0';
+      badge.style.border = '0';
+      badge.style.background = 'transparent';
     }
 
     function isCompactMode() {
@@ -12915,6 +12976,16 @@
           text: '',
           title: '',
           variant: 'muted',
+        };
+      }
+      if (statusType === 'warn' || statusType === 'warning') {
+        return {
+          visible: false,
+          text: '',
+          title: '',
+          variant: 'muted',
+          level: '',
+          reason: 'warn-not-top-alert',
         };
       }
       const shortText = buildShortStatusText(rawStatusText, statusType, opts);
@@ -13133,6 +13204,31 @@
 
       const persistent = shouldPersistStatus(statusType, latestStatusText, opts);
       const shortText = buildShortStatusText(latestStatusText, statusType, opts);
+      const badgeText = String(shortText || '').trim();
+      if (!badgeText) {
+        console.warn('[STATUS_BADGE][EMPTY_FORCE_HIDE]', {
+          reason: 'empty-status-text',
+          level: statusType,
+          rawStatusText: latestStatusText,
+        });
+        hideStatusBadge();
+        if (root) {
+          root.setAttribute('data-status-type', statusType);
+        }
+        if (!titleEl) {
+          titleEl = qs('.cgpt-toolbox-title', root);
+        }
+        if (titleEl) {
+          titleEl.title = latestStatusText
+            ? `${getToolboxTitle()} - ${latestStatusText}`
+            : getToolboxTitle();
+        }
+        if (typeof renderToolboxHeaderStatus === 'function') {
+          renderToolboxHeaderStatus(`setStatus:${opts.owner || 'ui'}:empty-badge`);
+        }
+        refreshTopStatusAlertSlot(`applyTopStatusEntry:empty-badge:${opts.owner || 'ui'}`);
+        return;
+      }
       const isTopMainStatus = isTopMainStatusDisplayText(latestStatusText, statusType, {
         ...opts,
         shortText,
@@ -13149,8 +13245,13 @@
 
         if (badge) {
           badge.style.display = '';
-          badge.textContent = shortText || '状态';
-          badge.title = latestStatusText || shortText || '';
+          badge.style.width = '';
+          badge.style.minWidth = '';
+          badge.style.padding = '';
+          badge.style.border = '';
+          badge.style.background = '';
+          badge.textContent = badgeText;
+          badge.title = latestStatusText || badgeText || '';
           badge.classList.remove(
             'cgpt-status-idle',
             'cgpt-status-running',
@@ -13210,7 +13311,19 @@
       const statusType = inferStatusType(rawStatusText, type);
       const opts = options || {};
       const owner = String(opts.owner || 'ui');
-      if (isNonErrorWarningStatus(statusType, rawStatusText)) {
+      /*
+       * 显式 warn / warning 只作为短提示或日志，不允许进入顶部红色 alert。
+       * 之前 isRealErrorStatusMessage 会因为“失败”关键词把 warn 升级为 error，
+       * 导致“继续指令发送失败，已暂停”这类状态一直显示成红色“报错”。
+       */
+      if (statusType === 'warn' || statusType === 'warning') {
+        opts.persist = opts.persist === true ? true : false;
+        if (!Number.isFinite(Number(opts.ttlMs)) || Number(opts.ttlMs) <= 0) {
+          opts.ttlMs = 2500;
+        }
+        opts.hideTopAlert = true;
+        opts.hideHeaderBadge = true;
+      } else if (isNonErrorWarningStatus(statusType, rawStatusText)) {
         opts.persist = false;
         if (!Number.isFinite(Number(opts.ttlMs)) || Number(opts.ttlMs) <= 0) {
           opts.ttlMs = 2500;
