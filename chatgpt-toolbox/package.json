@@ -15,7 +15,13 @@
     "check:dist-header-state": "node scripts/check-dist-no-header-free-state.mjs",
     "check:toolbox-shell-state": "node scripts/check-toolbox-shell-no-free-state.mjs",
     "check:refactor-duplicates": "node scripts/check-refactor-duplicates.mjs",
-    "check": "npm run check:refactor-duplicates",
+    "check:authority-state": "node scripts/check-authority-state-boundaries.mjs",
+    "verify:toolbox-state": "npm run check:authority-state && npm run build",
+    "check:no-chat-message-cache": "node scripts/check-no-chat-message-cache.mjs",
+    "audit:src-structure": "node scripts/audit-source-structure.mjs",
+    "archive:chat-message-cache": "node scripts/refactor-archive-chat-message-cache.mjs",
+    "verify:autoqueue-display-state": "node scripts/refactor-split-autoqueue-display-state.mjs --verify-only",
+    "check": "npm run check:refactor-duplicates && npm run check:no-chat-message-cache && npm run check:authority-state",
     "rebuild": "npm run build"
   },
   "devDependencies": {

@@ -85,3 +85,5 @@ if (typeof window !== 'undefined') {
   window.TextNormalizer = window.TextNormalizer || TextNormalizer;
   window.ToolboxTextNormalizer = window.ToolboxTextNormalizer || TextNormalizer;
 }
+
+

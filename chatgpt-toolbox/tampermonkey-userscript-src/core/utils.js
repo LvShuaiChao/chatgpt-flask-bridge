@@ -66,57 +66,22 @@
   }
 
   function readJsonFile(event, options = {}) {
-    if (typeof readJsonFileFromInput === 'function') {
-      return readJsonFileFromInput(event, options);
-    }
+    if (typeof readJsonFileFromInput !== 'function') {
+      const message = '[UTILS][readJsonFile][MISSING] readJsonFileFromInput is not available';
+      console.error(message);
 
-    const tag = options.tag || '[JSON_IMPORT]';
-    const file = event && event.target && event.target.files
-      ? event.target.files[0]
-      : null;
-
-    if (!file) {
-      return Promise.resolve(null);
-    }
-
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-
-      reader.onload = () => {
-        try {
-          const raw = String(reader.result || '');
-          resolve(JSON.parse(raw));
-        } catch (error) {
-          reject(error);
-        } finally {
-          if (event.target) {
-            event.target.value = '';
-          }
-        }
-      };
-
-      reader.onerror = () => {
-        const error = reader.error || new Error('FileReader read failed');
-        if (event.target) {
-          event.target.value = '';
-        }
-        reject(error);
-      };
-
-      reader.readAsText(file, options.encoding || 'utf-8');
-    }).catch((error) => {
-      console.error(`[UTILS][readJsonFile] ${tag} read failed`, error);
       if (
         typeof ToolboxShell !== 'undefined'
         && ToolboxShell
         && typeof ToolboxShell.appendLog === 'function'
       ) {
-        ToolboxShell.appendLog(
-          `[UTILS][readJsonFile][FAILED] tag=${tag} file=${file.name || '-'} error=${error && error.message ? error.message : String(error)}`,
-        );
+        ToolboxShell.appendLog(message);
       }
-      throw error;
-    });
+
+      return Promise.reject(new Error(message));
+    }
+
+    return readJsonFileFromInput(event, options);
   }
 
   const ToolboxUtils = globalThis.ToolboxUtils || {};
@@ -128,3 +93,5 @@
   globalThis.formatFileSize = globalThis.formatFileSize || ToolboxUtils.formatFileSize;
   globalThis.downloadJson = globalThis.downloadJson || ToolboxUtils.downloadJson;
   globalThis.readJsonFile = globalThis.readJsonFile || ToolboxUtils.readJsonFile;
+
+

@@ -84,3 +84,5 @@ function clickElementWithFallback(el, options = {}) {
     return { ok: false, method: '', reason: errText, source };
   }
 }
+
+

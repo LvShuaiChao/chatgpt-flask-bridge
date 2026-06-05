@@ -665,18 +665,6 @@ Cursor / Claude Code 修改指令必须尽可能可直接粘贴执行，不能�
     };
   }
 
-  const BATCH_REPLY_BLOCKED_TEXT_PATTERNS = [
-    /当前没有新的?剩余内容可以继续输出/,
-    /当前没有可继续补充的剩余内容/,
-    /没有可继续输出的内容/,
-    /不能输出[\s\S]*XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C/,
-    /缺少?实际验证材料/,
-    /没有实际修改、扫描、构建、测试结果/,
-    /任务不能判定完整完成/,
-    /无法判定任务完整完成/,
-    /需要用户提供/,
-  ];
-
   function classifyReplyState(replyText, isGenerating) {
     if (isGenerating === true) {
       return {
@@ -1310,4 +1298,6 @@ Cursor / Claude Code 修改指令必须尽可能可直接粘贴执行，不能�
       normalizeBindOptions(eventName, fourth),
     );
   }
+
+
 

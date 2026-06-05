@@ -187,15 +187,6 @@
     return isAuthorityReplyWaitingForButtons(snapshot);
   }
 
-  function resolvePageBusyForButtons(snapshot = {}) {
-    const authority = getToolboxAuthorityFromSnapshot(snapshot);
-    if (authority) {
-      return authority.replyBusy === true;
-    }
-    const topReplyBusy = isTopReplyBusyForButtons(snapshot);
-    return !!topReplyBusy;
-  }
-
   function getButtonAuthoritySnapshot(reason) {
     const startedAt = Date.now();
     try {
@@ -244,6 +235,9 @@
         closedLoopRunning: false,
         pendingSend: false,
         realSendReady: false,
+        canSend: false,
+        canInput: false,
+        canUpload: false,
         sendable: false,
         inputable: false,
         sendPhase: 'authority_missing',
@@ -265,6 +259,9 @@
         closedLoopRunning: false,
         pendingSend: false,
         realSendReady: false,
+        canSend: false,
+        canInput: false,
+        canUpload: false,
         sendable: false,
         inputable: false,
         sendPhase: 'authority_error',
@@ -677,27 +674,6 @@
     return getToolboxRunningOwnerFromRuntime(snapshot);
   }
 
-  function resolveStopVisibleFromAuthority(snapshot = {}) {
-    const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
-    const authority = snap.toolboxUnifiedAuthority;
-    if (authority && authority.composer && typeof authority.composer === 'object') {
-      const stopVisible = authority.composer.hasRealStopButton === true;
-      const line = `[SEND_BUTTON][STOP_VISIBLE_FROM_AUTHORITY] stop=${stopVisible ? 1 : 0} source=toolboxUnifiedAuthority`;
-      console.log(line);
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(line);
-      }
-      return stopVisible;
-    }
-    const topReplyAnswering = isTopReplyAnsweringForButtons(snap);
-    const line = `[SEND_BUTTON][STOP_VISIBLE_FROM_AUTHORITY] stop=${topReplyAnswering ? 1 : 0} source=topReplyAnswering-fallback`;
-    console.log(line);
-    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-      ToolboxShell.appendLog(line);
-    }
-    return topReplyAnswering;
-  }
-
   function logButtonOwnerSuppress(action, owner, reason) {
     const line = `[BUTTON_OWNER][SUPPRESS] action=${action || '-'} owner=${owner || '-'} reason=${reason || '-'}`;
     console.log(line);
@@ -1081,19 +1057,6 @@
       : null;
   }
 
-  function isSendFamilyOwner(snapshot, action) {
-    const batchOwner = getBatchTaskGroupOwnerFromSnapshot(snapshot);
-    if (batchOwner) {
-      return false;
-    }
-    const task = getSendFamilyTaskFromSnapshot(snapshot);
-    if (!task || !task.running) {
-      return false;
-    }
-    const current = String(task.action || (task.plan && task.plan.mode) || 'send-message').trim();
-    return current === String(action || '').trim();
-  }
-
   const SEND_MESSAGE_OWNER_BUTTON_ID = 'cgpt-send-message-once';
   const COPY_HOTKEY_ONCE_OWNER_BUTTON_ID = 'cgpt-copy-hotkey-once';
 
@@ -1178,9 +1141,15 @@
     const taskBusy = snap.taskBusy === true;
     const attachmentBusy = snap.attachmentBusy === true;
     const pendingSend = snap.pendingSend === true;
-    const sendable = snap.sendable === true;
-    const inputable = snap.inputable !== false;
-    const realSendReady = snap.realSendReady !== false;
+    const hasCanonicalCanSend = Object.prototype.hasOwnProperty.call(snap, 'canSend');
+    const hasCanonicalCanInput = Object.prototype.hasOwnProperty.call(snap, 'canInput');
+    const sendable = hasCanonicalCanSend
+      ? snap.canSend === true
+      : snap.sendable === true;
+    const inputable = hasCanonicalCanInput
+      ? snap.canInput === true
+      : snap.inputable === true;
+    const realSendReady = snap.realSendReady === true;
     let disabledReason = String(snap.disabledReason || '').trim();
     if (!disabledReason) {
       if (replyBusy) {
@@ -1470,8 +1439,6 @@
 
   const SEND_MESSAGE_RUNNING_CANCEL_TITLE =
     '发送任务正在进行中；再次点击将取消本次发送流程';
-  const SEND_COPY_HOTKEY_RUNNING_CANCEL_TITLE =
-    '发送+复制+快捷键流程正在进行中；再次点击将取消后续流程';
 
   function logSendButtonTextDecide(buttonId, phase, view = {}, tag = 'SEND_BUTTON') {
     const text = String(view.text || '').trim();
@@ -1665,19 +1632,6 @@
       || normalized.startsWith('stop-');
   }
 
-  function forceActiveButtonRedView(view = {}, ownerButtonId = '') {
-    const base = view && typeof view === 'object' ? view : {};
-    return {
-      ...base,
-      disabled: false,
-      allowCancel: base.allowCancel !== false,
-      buttonPhase: 'danger',
-      forceDanger: true,
-      preserveBaseColorWhenDisabled: false,
-      ownerButtonId: ownerButtonId || base.ownerButtonId || '',
-    };
-  }
-
   function isClosedLoopWaitingCountdownText(text) {
     const s = String(text || '').trim();
     return /（等待\s*\d+\s*s?）|（等待\s*\d+\s*秒）|\(等待\s*\d+\s*s?\)/.test(s);
@@ -1733,6 +1687,13 @@
     const snapshot = getButtonAuthoritySnapshot(
       'upload-button-vm:resolveUnifiedButtonVisualState:' + kind,
     );
+    const canonicalPermissionViewFields = {
+      canSend: snapshot.canSend === true,
+      canInput: snapshot.canInput === true,
+      canUpload: snapshot.canUpload === true,
+      sendable: snapshot.canSend === true,
+      inputable: snapshot.canInput === true,
+    };
     const blocked = Boolean(snapshot.disabledReason);
     const runningOwner = getToolboxRunningOwnerFromRuntime(runtimeState);
     const batchTaskGroupRunning = isRuntimeBatchTaskGroupRunning(runtimeState);
@@ -1802,8 +1763,7 @@
         closedLoopRunning: snapshot.closedLoopRunning === true,
         pendingSend: snapshot.pendingSend === true,
         realSendReady: snapshot.realSendReady === true,
-        sendable: snapshot.sendable === true,
-        inputable: snapshot.inputable === true,
+        ...canonicalPermissionViewFields,
         label: idleLabel || text,
         source: 'upload-button-vm:resolveUnifiedButtonVisualState',
         authoritySource: snapshot.source || '',
@@ -1858,8 +1818,7 @@
         closedLoopRunning: snapshot.closedLoopRunning === true,
         pendingSend: snapshot.pendingSend === true,
         realSendReady: snapshot.realSendReady === true,
-        sendable: snapshot.sendable === true,
-        inputable: snapshot.inputable === true,
+        ...canonicalPermissionViewFields,
         label: text,
         source: 'upload-button-vm:resolveUnifiedButtonVisualState',
         authoritySource: snapshot.source || '',
@@ -1903,8 +1862,7 @@
         closedLoopRunning: snapshot.closedLoopRunning === true,
         pendingSend: snapshot.pendingSend === true,
         realSendReady: snapshot.realSendReady === true,
-        sendable: snapshot.sendable === true,
-        inputable: snapshot.inputable === true,
+        ...canonicalPermissionViewFields,
         label: text,
         source: 'upload-button-vm:resolveUnifiedButtonVisualState',
         authoritySource: snapshot.source || '',
@@ -1943,8 +1901,7 @@
         closedLoopRunning: true,
         pendingSend: snapshot.pendingSend === true,
         realSendReady: snapshot.realSendReady === true,
-        sendable: snapshot.sendable === true,
-        inputable: snapshot.inputable === true,
+        ...canonicalPermissionViewFields,
         label: text,
         source: 'upload-button-vm:resolveUnifiedButtonVisualState',
         authoritySource: snapshot.source || '',
@@ -1984,8 +1941,7 @@
         closedLoopRunning: true,
         pendingSend: snapshot.pendingSend === true,
         realSendReady: snapshot.realSendReady === true,
-        sendable: snapshot.sendable === true,
-        inputable: snapshot.inputable === true,
+        ...canonicalPermissionViewFields,
         label: text,
         source: 'upload-button-vm:resolveUnifiedButtonVisualState',
         authoritySource: snapshot.source || '',
@@ -2046,8 +2002,7 @@
       closedLoopRunning: snapshot.closedLoopRunning === true,
       pendingSend: snapshot.pendingSend === true,
       realSendReady: snapshot.realSendReady === true,
-      sendable: snapshot.sendable === true,
-      inputable: snapshot.inputable === true,
+      ...canonicalPermissionViewFields,
       label: text,
       source: 'upload-button-vm:resolveUnifiedButtonVisualState',
       authoritySource: snapshot.source || '',
@@ -2712,21 +2667,8 @@
     return normalizeTaskPhase(normalizedPhase === 'waiting_send' ? 'waiting_send' : normalizedPhase);
   }
 
-  function getNormalizedSendTaskSubPhase(snapshot = {}) {
-    const sendTask = selectAuthoritativeSendTaskSnapshot(snapshot);
-    return normalizeButtonVmSendSubPhase(sendTask.phase, sendTask.subPhase);
-  }
-
   function isLegacySendPending(snapshot = {}) {
     return !!snapshot.pendingSendAfterReply;
-  }
-
-  function isLegacySendWaitingReply(snapshot = {}) {
-    return !!snapshot.waitingReply;
-  }
-
-  function isLegacyMessageSending(snapshot = {}) {
-    return !!snapshot.messageSending;
   }
 
   function getNormalizedAutoQueuePhase() {
@@ -3262,15 +3204,6 @@
     return Object.values(TaskPhase).includes(value) ? value : TaskPhase.IDLE;
   }
 
-  function isOwnTaskRunning(task) {
-    const phase = normalizeTaskPhase(task && task.phase);
-    return phase !== TaskPhase.IDLE
-      && phase !== TaskPhase.SUCCESS
-      && phase !== TaskPhase.FAILED
-      && phase !== TaskPhase.CANCELLED
-      && phase !== TaskPhase.DISABLED;
-  }
-
   function isCopyHotkeyLoopPhaseActive(phase) {
     const normalized = String(phase || TaskPhase.IDLE).trim().toLowerCase();
     if (normalized === 'paused') {
@@ -3332,36 +3265,6 @@
       action: 'none',
       buttonPhase: 'disabled',
     };
-  }
-
-  function formatUploadFailureUserMessage(reason, fallbackMessage = '') {
-    const normalized = String(reason || '').trim();
-    if (normalized === 'timeout-wait-ready') {
-      return '页面上传入口未就绪，已清理上传状态，请重试';
-    }
-    if (normalized === 'upload_input_not_ready') {
-      return '未找到当前输入框的文件上传入口，请刷新页面或重新打开会话';
-    }
-    if (normalized === 'composer_not_ready' || normalized === 'final-upload-blocked-composer-not-ready') {
-      return '页面上传入口未就绪，已清理上传状态，请重试';
-    }
-    if (normalized === 'no-files') {
-      return '本地队列没有可上传文件';
-    }
-    const fallback = String(fallbackMessage || '').trim();
-    return fallback;
-  }
-
-  function isUploadTaskPhaseActive(snapshot = {}) {
-    const uploadTask = snapshot.uploadTask && typeof snapshot.uploadTask === 'object'
-      ? snapshot.uploadTask
-      : {};
-    const phase = normalizeTaskPhase(uploadTask.phase);
-    return phase === TaskPhase.UPLOADING
-      || phase === TaskPhase.CANCELLING
-      || phase === 'preparing'
-      || phase === 'verifying'
-      || snapshot.uploadRunning === true;
   }
 
   function withUploadButtonTaskKey(view = {}) {
@@ -3679,28 +3582,6 @@
       action: 'start-upload',
       buttonPhase: 'idle',
     }, snapshot));
-  }
-
-  function tryHealStaleWaitingReplyBeforeSendButtonView(reason) {
-    if (
-      typeof UploadModule === 'undefined'
-      || !UploadModule
-      || typeof UploadModule.maybeHealStaleWaitingReplyState !== 'function'
-    ) {
-      return false;
-    }
-    try {
-      return !!UploadModule.maybeHealStaleWaitingReplyState(reason);
-    } catch (error) {
-      const errText = error && error.message ? error.message : String(error);
-      console.error('[SEND_BUTTON][HEAL_STALE_WAITING_REPLY_FAILED]', error);
-      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
-        ToolboxShell.appendLog(
-          `[SEND_BUTTON][HEAL_STALE_WAITING_REPLY_FAILED] reason=${reason || '-'} error=${errText}`,
-        );
-      }
-      return false;
-    }
   }
 
   function getSendMessageButtonViewState(snapshot = {}, capability = {}, hints = {}) {
@@ -4382,8 +4263,10 @@
       + `hasError=${hasError ? 1 : 0} `
       + `replyState=${String(snapshot.responseState || unified.raw?.responseState || '-')} `
       + `taskState=${String(authorityTask.state || snapshot.taskState || '-')} `
-      + `sendable=${capability.sendable === true || snapshot.sendable === true ? 1 : 0} `
-      + `inputable=${capability.inputable === true || snapshot.inputable === true ? 1 : 0} `
+      + `canSend=${snapshot.canSend === true || capability.canSend === true || capability.can_send === true ? 1 : 0} `
+      + `canInput=${snapshot.canInput === true || capability.canInput === true || capability.can_input === true ? 1 : 0} `
+      + `legacy_sendable=${capability.sendable === true || snapshot.sendable === true ? 1 : 0} `
+      + `legacy_inputable=${capability.inputable === true || snapshot.inputable === true ? 1 : 0} `
       + `disabledReason=${String(snapshot.disabledReason || capability.disabled_reason || '-')}`;
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(line);
@@ -4427,9 +4310,23 @@
     const hasCurrentOwner = ownerButtonId === 'cgpt-send-copy-hotkey-once';
     const explicitRunning = task.running === true && hasCurrentOwner;
     const phaseLooksRunning = hasCurrentOwner && isVmSendCopyHotkeyRunningPhase(taskPhase);
-    if (authoritySaysIdle && explicitRunning !== true) {
+    const taskUpdatedAt = Number(task.updatedAt || task.startedAt || task.ts || 0);
+    const taskAgeMs = taskUpdatedAt > 0 ? Date.now() - taskUpdatedAt : 0;
+    const staleRunningByAge = taskAgeMs <= 0 || taskAgeMs > 8000;
+    const authorityIdleShouldSuppress = !!(
+      authoritySaysIdle
+      && hasCurrentOwner
+      && (
+        explicitRunning === true
+        || phaseLooksRunning === true
+      )
+      && staleRunningByAge
+    );
+    if (authoritySaysIdle && (explicitRunning !== true || authorityIdleShouldSuppress)) {
       const line = [
-        '[SEND_COPY_HOTKEY_BUTTON][STALE_RUNNING_SUPPRESSED]',
+        authorityIdleShouldSuppress
+          ? '[SEND_COPY_HOTKEY_BUTTON][STALE_RUNNING_SUPPRESSED_BY_AUTHORITY]'
+          : '[SEND_COPY_HOTKEY_BUTTON][STALE_RUNNING_SUPPRESSED]',
         `taskPhase=${taskPhase || '-'}`,
         `ownerButtonId=${ownerButtonId || '-'}`,
         `taskAction=${taskAction || '-'}`,
@@ -4437,6 +4334,8 @@
         `authorityTaskBusy=${authorityTaskBusy ? 1 : 0}`,
         `authorityReplyBusy=${authorityReplyBusy ? 1 : 0}`,
         `authorityPendingSend=${authorityPendingSend ? 1 : 0}`,
+        `taskRunning=${task.running === true ? 1 : 0}`,
+        `taskAgeMs=${taskAgeMs}`,
       ].join(' ');
       if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
         ToolboxShell.appendLog(line);
@@ -4532,27 +4431,20 @@
     const sendCopyHotkeyMode = snapshot.sendCopyHotkeyMode
       || (hasRealComposerPayload ? 'send_then_copy_hotkey' : 'copy_hotkey_only');
     const canSendNow = !!(
-      capability.can_send_now === true
+      snapshot.canSend === true
+      || capability.canSend === true
+      || capability.can_send === true
+      || capability.can_send_now === true
       || capability.canSendNow === true
       || capability.send_decision === 'allowed'
       || capability.sendDecision === 'allowed'
-      || snapshot.can_send_now === true
-      || snapshot.canSendNow === true
-      || snapshot.sendDecision === 'allowed'
-      || capability.sendable === true
-      || capability.sendable === 1
-      || snapshot.sendable === true
-      || snapshot.sendable === 1
     );
     const canAcceptInput = !!(
-      capability.can_accept_input === true
+      snapshot.canInput === true
+      || capability.canInput === true
+      || capability.can_input === true
+      || capability.can_accept_input === true
       || capability.canAcceptInput === true
-      || snapshot.can_accept_input === true
-      || snapshot.canAcceptInput === true
-      || capability.inputable === true
-      || capability.inputable === 1
-      || snapshot.inputable === true
-      || snapshot.inputable === 1
     );
     const finalPhase = String(finalView.phase || 'idle').trim().toLowerCase();
     const finalColor = (
@@ -5330,23 +5222,6 @@
     }
 
     return TaskPhase.IDLE;
-  }
-
-  function isCapabilityResponding(capability = {}) {
-    const cap = capability && typeof capability === 'object' ? capability : {};
-    const state = String(cap.response_state || cap.responseState || '').trim().toLowerCase();
-    const reason = String(cap.response_state_reason || cap.responseStateReason || '').trim().toLowerCase();
-    return !!(
-      cap.isResponding
-      || cap.is_responding
-      || cap.responding
-      || state === 'generating'
-      || state === 'responding'
-      || state === 'waiting_reply'
-      || state === 'answering'
-      || reason === 'assistant_busy'
-      || reason === 'response_in_progress'
-    );
   }
 
   function getPageReplyStatus(snapshot = {}) {
@@ -6746,6 +6621,47 @@
     const changed = ButtonState.setToolboxButtonState(button, options);
     if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLogIfChanged === 'function') {
       ToolboxShell.appendLogIfChanged(
+        `BUTTON_AUTHORITY_APPLY:${button.id || '-'}`,
+        [
+          button.id || '-',
+          canonicalAction || action || '-',
+          snapshot.canSend ? 1 : 0,
+          snapshot.canInput ? 1 : 0,
+          snapshot.sendable ? 1 : 0,
+          snapshot.inputable ? 1 : 0,
+          snapshot.realSendReady ? 1 : 0,
+          snapshot.replyBusy ? 1 : 0,
+          snapshot.taskBusy ? 1 : 0,
+          snapshot.pendingSend ? 1 : 0,
+          snapshot.sendPhase || '-',
+          resolvedView.phase || '-',
+          resolvedView.buttonPhase || '-',
+          options.disabled ? 1 : 0,
+          reason || '-',
+        ].join('|'),
+        [
+          '[BUTTON_STATE][AUTHORITY_APPLY]',
+          `id=${button.id || '-'}`,
+          `action=${canonicalAction || action || '-'}`,
+          `canSend=${snapshot.canSend ? 1 : 0}`,
+          `canInput=${snapshot.canInput ? 1 : 0}`,
+          `sendable=${snapshot.sendable ? 1 : 0}`,
+          `inputable=${snapshot.inputable ? 1 : 0}`,
+          `realSendReady=${snapshot.realSendReady ? 1 : 0}`,
+          `replyBusy=${snapshot.replyBusy ? 1 : 0}`,
+          `taskBusy=${snapshot.taskBusy ? 1 : 0}`,
+          `pendingSend=${snapshot.pendingSend ? 1 : 0}`,
+          `sendPhase=${snapshot.sendPhase || '-'}`,
+          `viewPhase=${resolvedView.phase || '-'}`,
+          `buttonPhase=${resolvedView.buttonPhase || '-'}`,
+          `disabled=${options.disabled ? 1 : 0}`,
+          `reason=${reason || '-'}`,
+        ].join(' '),
+        1000,
+      );
+    }
+    if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLogIfChanged === 'function') {
+      ToolboxShell.appendLogIfChanged(
         `BUTTON_VIEW_RENDER_SOURCE:${button.id || '-'}`,
         [
           button.id || '-',
@@ -7057,3 +6973,5 @@
     mapTaskPhaseToButtonPhase: mapTaskPhaseToButtonStatePhase,
     applyUploadButtonViewState,
   });
+
+

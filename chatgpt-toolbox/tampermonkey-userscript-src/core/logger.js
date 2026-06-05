@@ -444,7 +444,11 @@
             totalJSHeapSize: performance.memory.totalJSHeapSize,
           };
         } catch (e) {
-          // ignore
+          const errText = e && e.message ? e.message : String(e);
+          console.warn('[TOOLBOX_RUNTIME_STATS][MEMORY_READ_FAILED]', e);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[TOOLBOX_RUNTIME_STATS][MEMORY_READ_FAILED] error=${errText}`);
+          }
         }
       }
 
@@ -511,43 +515,6 @@
     if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
       ToolboxShell.appendLog(message);
     }
-  }
-
-  function isWaitingAnswerVisualState(options = {}) {
-    const text = String(options.text || options.buttonText || '').trim();
-    const state = String(options.state || '').trim().toLowerCase();
-    const responseState = String(
-      options.responseState || options.response_state || '',
-    ).trim().toLowerCase();
-
-    if (options.copyLastMessageWaiting) {
-      return true;
-    }
-
-    if (
-      text === '等待回答'
-      || text === '等待回复...'
-      || /等待回复/.test(text)
-      || /正在等待回复/.test(text)
-      || text === '回答中'
-      || /回答中/.test(text)
-    ) {
-      return true;
-    }
-
-    if (state === 'pending_reply' || state === 'generating') {
-      return true;
-    }
-
-    if (responseState === 'pending_reply' || responseState === 'generating') {
-      return true;
-    }
-
-    if (options.isResponding === true || options.is_responding === true) {
-      return true;
-    }
-
-    return false;
   }
 
   function isToolboxCopyActionButton(button) {
@@ -843,53 +810,6 @@
         );
       }
     }, true);
-  }
-
-  function applyWaitingAnswerButtonStyle(button, waiting, options = {}) {
-    if (!button) {
-      return;
-    }
-
-    const styleClasses = [
-      'danger',
-      'primary',
-      'success',
-      'warning',
-      'orange',
-      'amber',
-      'cgpt-waiting-answer',
-    ];
-
-    if (Array.isArray(options.extraRemoveClasses)) {
-      options.extraRemoveClasses.forEach((name) => {
-        const cls = String(name || '').trim();
-        if (cls && !styleClasses.includes(cls)) {
-          styleClasses.push(cls);
-        }
-      });
-    }
-
-    button.classList.remove(...styleClasses, 'cgpt-btn-error', 'cgpt-btn-ok');
-
-    if (waiting) {
-      button.classList.add('cgpt-waiting-answer');
-      if (!isToolboxCopyActionButton(button)) {
-        button.classList.add('danger');
-      }
-      return;
-    }
-
-    const idleClass = String(options.idleClass || 'primary').trim() || 'primary';
-    button.classList.add(idleClass);
-
-    if (Array.isArray(options.extraIdleClasses)) {
-      options.extraIdleClasses.forEach((name) => {
-        const cls = String(name || '').trim();
-        if (cls) {
-          button.classList.add(cls);
-        }
-      });
-    }
   }
 
   function createToolboxButton(text, options = {}) {
@@ -1459,7 +1379,11 @@
         intervals,
       });
     } catch (e) {
-      // ignore
+      const errText = e && e.message ? e.message : String(e);
+      console.warn('[TOOLBOX_TIMER_REGISTRY][REGISTER_GLOBAL_FAILED]', e);
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(`[TOOLBOX_TIMER_REGISTRY][REGISTER_GLOBAL_FAILED] module=${name || '-'} error=${errText}`);
+      }
     }
 
     function logTimerCleanupFailure(action, error) {
@@ -1601,75 +1525,6 @@
       intervals: intervals.size,
     });
     return api;
-  }
-
-  function createObserverRegistry(moduleName) {
-    const name = String(moduleName || 'MODULE').trim() || 'MODULE';
-    const observers = new Map(); // name -> MutationObserver
-
-    const globalTarget = getDebugApiTarget();
-    if (!globalTarget.__CGPT_TOOLBOX_OBSERVERS__) {
-      globalTarget.__CGPT_TOOLBOX_OBSERVERS__ = new Map();
-    }
-    try {
-      globalTarget.__CGPT_TOOLBOX_OBSERVERS__.set(name, observers);
-    } catch (e) {
-      // ignore
-    }
-
-    function register(observerName, observer) {
-      const key = String(observerName || '').trim() || 'observer';
-      if (!(observer instanceof MutationObserver)) {
-        return false;
-      }
-      if (observers.has(key)) {
-        if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-          ToolboxShell.appendLog(`[OBSERVER][SKIP_DUPLICATE] module=${name} name=${key}`);
-        }
-        return false;
-      }
-      observers.set(key, observer);
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[OBSERVER][CREATE] module=${name} name=${key}`);
-      }
-      return true;
-    }
-
-    function disconnect(observerName) {
-      const key = String(observerName || '').trim() || 'observer';
-      const obs = observers.get(key);
-      if (!obs) return false;
-      try {
-        obs.disconnect();
-      } catch (error) {
-        console.warn(`[ChatGPT toolbox] ${name}.observer disconnect failed`, error);
-      }
-      observers.delete(key);
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(`[OBSERVER][DISCONNECT] module=${name} name=${key}`);
-      }
-      return true;
-    }
-
-    function disconnectAll() {
-      Array.from(observers.keys()).forEach((k) => disconnect(k));
-    }
-
-    function dump() {
-      return {
-        moduleName: name,
-        activeObservers: observers.size,
-        names: Array.from(observers.keys()),
-      };
-    }
-
-    return {
-      register,
-      disconnect,
-      disconnectAll,
-      dump,
-      has: (observerName) => observers.has(String(observerName || '').trim() || 'observer'),
-    };
   }
 
   function dumpAllTimers() {
@@ -2719,15 +2574,6 @@
       const n = Number(value);
       if (!Number.isFinite(n)) return fallback;
       const intValue = Math.floor(n);
-      if (intValue < min) return fallback;
-      if (intValue > max) return max;
-      return intValue;
-    }
-
-    function normalizeClosedLoopNextDelayMs(value, fallback, min, max) {
-      const n = Number(value);
-      if (!Number.isFinite(n)) return fallback;
-      const intValue = Math.round(n);
       if (intValue < min) return fallback;
       if (intValue > max) return max;
       return intValue;
@@ -3792,17 +3638,6 @@
     ].join('') + '_' + pad3(d.getMilliseconds()) + '_' + rand;
   }
 
-  function buildTimestampedFileName(fileName, tag) {
-    const raw = String(fileName || 'file').replace(/^.*[/\\]/, '');
-    const dot = raw.lastIndexOf('.');
-
-    if (dot > 0) {
-      return `${raw.slice(0, dot)}_${tag}${raw.slice(dot)}`;
-    }
-
-    return `${raw}_${tag}`;
-  }
-
   function getObjectTag(value) {
     return Object.prototype.toString.call(value);
   }
@@ -4825,4 +4660,6 @@
   /********************************************************************
    * 1. ToolboxShell：统一外壳
    ********************************************************************/
+
+
 

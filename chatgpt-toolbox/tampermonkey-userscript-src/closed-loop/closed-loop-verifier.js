@@ -18,3 +18,5 @@ const ClosedLoopVerifier = (() => {
 if (typeof window !== 'undefined') {
   window.ClosedLoopVerifier = ClosedLoopVerifier;
 }
+
+

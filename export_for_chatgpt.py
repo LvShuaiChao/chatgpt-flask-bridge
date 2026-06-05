@@ -1,7 +1,7 @@
 """
 将项目源码与配置打成文本文件，便于整段粘贴到 ChatGPT。
 
-- **导出模式**（文件顶部 ``EXPORT_MODE``，无 argparse）：``core``（默认，运行源码+核心配置）、``debug``（+ ``chatgpt-toolbox/scripts/``）、``full``（原全量扫描，含 docs/报告/CI 等）。
+- **导出模式**（文件顶部 ``EXPORT_MODE``，无 argparse）：``core``（默认，仅油猴源码 ``tampermonkey-userscript-src/``）、``debug``（同上）、``full``（同上；不再收录 Python / Flask 等后端代码）。
 - **扫描**：遍历项目根下允许的扩展名，跳过无关目录；统一调用 ``export_should_skip_relative_path``，并按 ``EXPORT_MODE`` 额外排除审查报告、死代码文档、Prompt 备份等（``full`` 不启用该层过滤）。
 - **主输出**：仓库根目录 ``0_merged_for_chatgpt.txt`` / ``0_merged_for_chatgpt.zip``（超出 ``MAX_TOKENS_PER_OUTPUT_FILE`` 则拆分为 ``*_partNN.txt`` 及同名 zip）；``--no-export-zip`` 可关闭 zip。
 - **辅助输出**（``exports/for_chatgpt/``）：统计说明、日志副本、增量清单 ``.export_for_chatgpt_mtimes.json``，不占用根目录。
@@ -119,6 +119,7 @@ def _detect_project_root(script_home: Path) -> Path:
 PROJECT_ROOT = _detect_project_root(_SCRIPT_HOME)
 CHATGPT_TOOLBOX_DIR = PROJECT_ROOT / "chatgpt-toolbox"
 USERSCRIPT_DIST_REL = "chatgpt-toolbox/dist/client.user.js"  # 仅用于构建检测，不纳入合并包
+USERSCRIPT_SRC_PREFIX = "chatgpt-toolbox/tampermonkey-userscript-src/"  # 合并包仅收录此目录
 
 # 导出前构建油猴 dist（需 chatgpt-toolbox/package.json）
 RUN_BUILD_BEFORE_EXPORT = True
@@ -306,6 +307,7 @@ _ALWAYS_SKIP_DIR_SEGMENTS = frozenset(
         "dist",
         "build",
         "runs",
+        "client-user-js-history",
     }
 )
 
@@ -355,7 +357,8 @@ def export_should_skip_relative_path(rel_posix: str, *, basename: str = "") -> b
     """按相对路径（posix、小写）判断是否跳过扫描/合并。
 
     默认排除（非源码）：log.txt、*.log、runtime/、logs/、dist/、build/、
-    __pycache__/、.git/、.venv/、venv/、client.user.js 及 chatgpt-toolbox/dist/client.user.js 等。
+    __pycache__/、.git/、.venv/、venv/、client-user-js-history/、client.user.js 及
+    chatgpt-toolbox/dist/client.user.js 等。
     敏感路径（账号配置、密码库、browser profile、runs/ 等）始终排除。
     """
     rel = str(rel_posix or "").strip().lower().replace("\\", "/")
@@ -675,24 +678,17 @@ ALLOWED_SUFFIXES = {
 
 _STDLIB_TOP: frozenset[str] | None = None
 
-# 本仓库主要源码（用于文档/说明；实际收录以排除规则 + 后缀为准）
-CORE_EXPORT_ROOT_FILES: frozenset[str] = frozenset(
-    {
-        "gui.py",
-        "requirements.txt",
-        "export_for_chatgpt.py",
-    }
-)
+# 合并包白名单说明（实际过滤见 ``_is_core_export_path``）
+CORE_EXPORT_ROOT_FILES: frozenset[str] = frozenset()
 
 
 def _is_core_export_path(rel_posix: str) -> bool:
-    """油猴+Python 联动：通过后缀与排除规则的文件均纳入（仅再挡 export 脚本 slim）。"""
+    """合并包仅收录油猴脚本源码目录（``tampermonkey-userscript-src/``），排除 Python 等其它代码。"""
     rel = str(rel_posix or "").strip().lower().replace("\\", "/")
     if not rel:
         return False
-    if SLIM_SKIP_EXPORT_SCRIPT and rel == "export_for_chatgpt.py":
-        return False
-    return True
+    prefix = USERSCRIPT_SRC_PREFIX.lower()
+    return rel.startswith(prefix)
 
 
 def _stdlib_top_level() -> frozenset[str]:
@@ -1126,9 +1122,9 @@ def build_header(
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     project_name = project_root.resolve().name
     mode_label = {
-        "core": "core（运行源码 + 核心配置，默认排除 docs/报告/脚本/README 等）",
-        "debug": "debug（运行源码 + chatgpt-toolbox/scripts/，仍排除死代码文档与报告）",
-        "full": "full（全量 project scan，与改前一致）",
+        "core": f"core（仅油猴源码 {USERSCRIPT_SRC_PREFIX}，不含 Python/Flask 等）",
+        "debug": f"debug（仅油猴源码 {USERSCRIPT_SRC_PREFIX}）",
+        "full": f"full（仅油猴源码 {USERSCRIPT_SRC_PREFIX}）",
     }.get(EXPORT_MODE, f"{EXPORT_MODE}（未知模式，按 core 回退过滤）")
     lines = [
         "=" * 100,

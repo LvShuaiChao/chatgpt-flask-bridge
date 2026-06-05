@@ -314,10 +314,11 @@
       if (!files.length && !flaskHtml) {
         if (state.moduleRenderFailed) {
           return `
-          <div class="cgpt-upload-item empty toolbox-upload-empty-state">
+          <div class="cgpt-upload-item empty toolbox-upload-empty-state toolbox-upload-degraded-panel">
             <div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-hint">队列已恢复，但界面渲染失败，请查看日志</div>
-              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">${escapeHtml(state.moduleInitError || 'render-failed')}</div>
+              <div class="cgpt-upload-meta toolbox-upload-drop-hint">多文件上传模块已降级</div>
+              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">${escapeHtml(state.moduleInitError || '上传界面渲染失败，其他功能仍可使用')}</div>
+              <div class="cgpt-upload-meta toolbox-upload-drop-over-hint">发送、复制、快捷键和无限继续不受影响。可点击上方「清理上传队列缓存并刷新」恢复上传面板。</div>
             </div>
           </div>
         `;
@@ -833,3 +834,5 @@
 
     return { create };
   })();
+
+

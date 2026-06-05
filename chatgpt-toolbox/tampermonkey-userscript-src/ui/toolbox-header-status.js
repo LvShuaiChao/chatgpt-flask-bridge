@@ -389,6 +389,17 @@
 
 
     function readHeaderAuthority(reason = '-') {
+      const now = Date.now();
+      const cached = (
+        typeof window !== 'undefined'
+        && window.__cgptToolboxAuthorityCache
+        && typeof window.__cgptToolboxAuthorityCache === 'object'
+        && window.__cgptToolboxAuthorityCache.flags
+      ) ? window.__cgptToolboxAuthorityCache : null;
+      const cachedAt = cached && Number(cached.builtAt || cached.at || 0);
+      if (cached && cachedAt > 0 && now - cachedAt <= 500) {
+        return cached;
+      }
       if (
         typeof UploadModule !== 'undefined'
         && UploadModule
@@ -396,29 +407,15 @@
       ) {
         try {
           return UploadModule.getToolboxAuthorityState(`header-status:${reason || '-'}`, {
-            force: true,
-            cacheTtlMs: 0,
+            force: false,
+            cacheTtlMs: 500,
           });
         } catch (error) {
           console.error('[HEADER_STATUS][AUTHORITY_READ_FAILED]', error);
-          return null;
+          return cached || null;
         }
       }
-      const cached = (
-        typeof window !== 'undefined'
-        && window.__cgptToolboxAuthorityCache
-        && typeof window.__cgptToolboxAuthorityCache === 'object'
-        && window.__cgptToolboxAuthorityCache.flags
-      )
-        ? window.__cgptToolboxAuthorityCache
-        : null;
-      if (cached) {
-        console.warn('[HEADER_STATUS][AUTHORITY_CACHE_ONLY_FALLBACK]', {
-          reason: reason || '-',
-        });
-        return cached;
-      }
-      return null;
+      return cached || null;
     }
 
     function buildToolboxHeaderStatusSnapshot(reason, runtimeState) {
@@ -467,8 +464,22 @@
         || '',
       ).trim().toLowerCase();
 
-      const sendTaskPhase = String(task.sendPhase || task.phase || 'idle').trim().toLowerCase();
+      const sendTaskPhase = String(
+        authority.sendPhase
+        || task.sendPhase
+        || task.phase
+        || 'idle',
+      ).trim().toLowerCase();
+      const authoritySendPhase = sendTaskPhase;
       const uploadTaskPhase = String(task.uploadPhase || 'idle').trim().toLowerCase();
+
+      const composerState = String(
+        composer.state
+        || composer.composerState
+        || flags.composerState
+        || authority.composerState
+        || '',
+      ).trim().toLowerCase();
 
       const waitingReply = !!(
         flags.replyBusy === true
@@ -479,7 +490,8 @@
 
       const waitingSend = !!(
         flags.pendingSend === true
-        || reply.state === 'waiting_send'
+        || composerState === 'sendable'
+        || composerState === 'pending_send'
         || sendTaskPhase === 'waiting_send'
       );
 
@@ -522,9 +534,10 @@
       }
 
       appendHeaderStatusLog(
-        `[HEADER_STATUS][AUTHORITY_MIRROR] reason=${reason || '-'} `
-        + `reply=${reply.text || '-'} replyState=${reply.state || '-'} `
-        + `task=${task.text || '-'} taskState=${task.state || '-'} `
+        `[HEADER_STATUS][AUTHORITY_USED] reason=${reason || '-'} `
+        + `reply=${reply.text || '-'}|state=${reply.state || '-'} `
+        + `task=${task.text || '-'}|taskState=${task.state || '-'} `
+        + `composerState=${composerState || '-'} sendPhase=${authoritySendPhase || '-'} `
         + `canSend=${flags.canSend ? 1 : 0} pendingSend=${flags.pendingSend ? 1 : 0}`,
       );
 
@@ -538,8 +551,9 @@
         responseReason,
         waitingReply,
         waitingSend,
-        sendTaskPhase,
+        sendTaskPhase: authoritySendPhase,
         uploadTaskPhase,
+        composerState,
         pageDisplayId: String(page.pageDisplayId || '-'),
         turnCount: Number(page.turnCount || 0) || 0,
         chips,
@@ -1001,4 +1015,6 @@
     ToolboxHeaderStatus.auditHeaderStatusVisibility(reason, snapshot, wrap);
 
   }
+
+
 

@@ -51,3 +51,10 @@ chatgpt-toolbox/dist/
 
 # Node dependencies
 node_modules/
+
+# Tampermonkey temp build check artifact (not for installation)
+chatgpt-toolbox/tampermonkey-userscript-src/.tmp-build-order-check.js
+
+# Historical client.user.js batch build archive (local backup, do not commit)
+client-user-js-history/
+.worktree-client-user-js-batch/

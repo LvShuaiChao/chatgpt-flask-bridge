@@ -106,17 +106,6 @@
     ButtonPhase.DANGER,
   ]);
 
-  const BUTTON_PHASE_CANCEL_DANGER = new Set([
-    ButtonPhase.WAITING,
-    ButtonPhase.RUNNING,
-    ButtonPhase.SENDING,
-    ButtonPhase.UPLOADING,
-    ButtonPhase.WAITING_SEND,
-    ButtonPhase.WAITING_REPLY,
-    ButtonPhase.COPYING,
-    ButtonPhase.CANCELLING,
-  ]);
-
   const BUTTON_TEXT_LEAK_MARKERS = Object.freeze([
     '点击取消',
     '点击停止',
@@ -295,33 +284,6 @@
     ButtonPhase.CANCELLING,
   ]);
 
-  const SEND_BTN_ALLOWED_TEXTS = new Set([
-    '发送消息',
-    '等待发送',
-    '等待点击发送',
-    '等待页面回复后发送',
-    '等待输入框',
-    '等待附件',
-    '准备发送',
-    '等待发送按钮',
-    '上传中',
-    '检查中',
-    '发送中',
-    '等待回复',
-    '取消中',
-    '发送失败',
-    '已取消',
-    '停止回答',
-    '停止中',
-    '正在复制',
-    '发送快捷键',
-    '执行中',
-    '流程失败',
-    '继续中',
-    '准备复制',
-    '正在停止',
-  ]);
-
   const TASK_PHASE_TO_BUTTON_PHASE = Object.freeze({
     idle: ButtonPhase.IDLE,
     initializing: ButtonPhase.INITIALIZING,
@@ -458,14 +420,20 @@
     if (disabledReason) {
       buttonColorRole = 'blocked';
     }
+    const canInput = flags.canInput === true;
+    const canSend = flags.canSend === true;
+    const canUpload = flags.canUpload === true;
     return {
       source,
       responseState: String(raw.responseState || reply.state || '').trim().toLowerCase(),
       responseReason: String(raw.responseReason || reply.reason || '').trim().toLowerCase(),
-      inputable: flags.canInput === true,
-      sendable: flags.canSend === true,
+      inputable: canInput,
+      sendable: canSend,
+      canInput,
+      canSend,
+      canUpload,
       assistantBusy: flags.replyBusy === true,
-      canSendByHeader: flags.canSend === true,
+      canSendByHeader: canSend,
       replyBusy: flags.replyBusy === true,
       taskBusy: flags.taskBusy === true || batchTaskGroupRunning,
       attachmentBusy: composer.composerUploading === true,
@@ -478,99 +446,9 @@
       sendPhase,
       disabledReason,
       buttonColorRole,
-      canUploadByHeader: flags.canUpload === true,
+      canUploadByHeader: canUpload,
       uploadQuotaExceeded,
       uploadQuotaRemaining,
-    };
-  }
-
-  // 仅 legacy debug 用。正式按钮状态禁止从 __cgptBridgeState 推导。
-  function normalizeBridgeStateForButtonState(bridgeState = {}) {
-    const replyFromStructured = bridgeState.reply && typeof bridgeState.reply === 'object'
-      ? bridgeState.reply
-      : {};
-    const composerFromStructured = bridgeState.composer && typeof bridgeState.composer === 'object'
-      ? bridgeState.composer
-      : {};
-    const permissionFromStructured = bridgeState.permission && typeof bridgeState.permission === 'object'
-      ? bridgeState.permission
-      : {};
-    const responseState = String(
-      replyFromStructured.state
-      || bridgeState.responseState
-      || bridgeState.response_state
-      || '',
-    ).trim().toLowerCase();
-    const responseStateReason = String(
-      replyFromStructured.reason
-      || bridgeState.responseStateReason
-      || bridgeState.response_state_reason
-      || bridgeState.reason
-      || '',
-    ).trim().toLowerCase();
-    const isResponding = (
-      replyFromStructured.busy === true
-      || bridgeState.isResponding === true
-      || bridgeState.is_responding === true
-      || responseState === 'generating'
-      || responseState === 'answering'
-      || responseState === 'responding'
-    );
-    const composerExists = (
-      composerFromStructured.exists === true
-      || bridgeState.hasComposer === true
-      || bridgeState.has_composer === true
-    );
-    const inputReady = (
-      composerFromStructured.inputReady === true
-      || bridgeState.canAcceptInput === true
-      || bridgeState.can_accept_input === true
-      || bridgeState.inputable === true
-    );
-    const hasPayload = (
-      composerFromStructured.hasPayload === true
-      || bridgeState.hasComposerPayload === true
-      || bridgeState.has_composer_payload === true
-      || bridgeState.pendingSend === true
-      || bridgeState.pending_send === true
-    );
-    const nativeSendReady = (
-      composerFromStructured.nativeSendReady === true
-      || bridgeState.canSendNow === true
-      || bridgeState.can_send_now === true
-      || bridgeState.sendable === true
-    );
-    const attachmentCount = Number(
-      composerFromStructured.attachmentCount
-      || bridgeState.attachmentCount
-      || bridgeState.attachment_count
-      || 0,
-    );
-    const canInput = permissionFromStructured.canInput === true || inputReady === true;
-    const canSend = permissionFromStructured.canSend === true || nativeSendReady === true;
-    const canUpload = permissionFromStructured.canUpload === true || (
-      canInput === true
-      && isResponding === false
-      && hasPayload === false
-    );
-    return {
-      reply: {
-        state: responseState || (isResponding ? 'generating' : 'idle'),
-        busy: isResponding,
-        reason: responseStateReason,
-      },
-      composer: {
-        exists: composerExists,
-        inputReady,
-        hasPayload,
-        nativeSendReady,
-        attachmentCount,
-      },
-      permission: {
-        canInput,
-        canSend,
-        canUpload,
-      },
     };
   }
 
@@ -654,23 +532,76 @@
     return value === true || value === 1 || value === '1' || value === 'true';
   }
 
+  function pickFirstDefinedButtonStateValue(...values) {
+    for (const value of values) {
+      if (value !== undefined && value !== null && value !== '') {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
+  function normalizeFirstDefinedBooleanForButtonState(...values) {
+    return normalizeBooleanForButtonState(pickFirstDefinedButtonStateValue(...values));
+  }
+
   function normalizeButtonAuthoritySnapshot(raw, source) {
     const now = Date.now();
     const snapshot = raw && typeof raw === 'object' ? raw : {};
-    const replyBusy = normalizeBooleanForButtonState(snapshot.replyBusy || snapshot.reply_busy || snapshot.isReplyBusy || snapshot.assistantBusy);
-    const taskBusy = normalizeBooleanForButtonState(snapshot.taskBusy || snapshot.task_busy || snapshot.isTaskBusy);
-    const attachmentBusy = normalizeBooleanForButtonState(snapshot.attachmentBusy || snapshot.attachment_busy || snapshot.uploading);
-    const closedLoopRunning = normalizeBooleanForButtonState(snapshot.closedLoopRunning || snapshot.closed_loop_running);
-    const batchTaskGroupRunning = normalizeBooleanForButtonState(
-      snapshot.batchTaskGroupRunning || snapshot.batch_task_group_running,
+    const replyBusy = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.replyBusy,
+      snapshot.reply_busy,
+      snapshot.isReplyBusy,
+      snapshot.assistantBusy,
     );
-    const anyToolboxOwnerRunning = normalizeBooleanForButtonState(
-      snapshot.anyToolboxOwnerRunning || snapshot.any_toolbox_owner_running,
+    const taskBusy = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.taskBusy,
+      snapshot.task_busy,
+      snapshot.isTaskBusy,
     );
-    const pendingSend = normalizeBooleanForButtonState(snapshot.pendingSend || snapshot.pending_send);
-    const realSendReady = normalizeBooleanForButtonState(snapshot.realSendReady || snapshot.real_send_ready);
-    const sendable = normalizeBooleanForButtonState(snapshot.sendable);
-    const inputable = normalizeBooleanForButtonState(snapshot.inputable);
+    const attachmentBusy = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.attachmentBusy,
+      snapshot.attachment_busy,
+      snapshot.uploading,
+    );
+    const closedLoopRunning = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.closedLoopRunning,
+      snapshot.closed_loop_running,
+    );
+    const batchTaskGroupRunning = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.batchTaskGroupRunning,
+      snapshot.batch_task_group_running,
+    );
+    const anyToolboxOwnerRunning = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.anyToolboxOwnerRunning,
+      snapshot.any_toolbox_owner_running,
+    );
+    const pendingSend = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.pendingSend,
+      snapshot.pending_send,
+    );
+    const realSendReady = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.realSendReady,
+      snapshot.real_send_ready,
+    );
+    const canSend = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.canSend,
+      snapshot.can_send,
+      snapshot.canSendByHeader,
+      snapshot.sendable,
+    );
+    const canInput = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.canInput,
+      snapshot.can_input,
+      snapshot.inputable,
+    );
+    const canUpload = normalizeFirstDefinedBooleanForButtonState(
+      snapshot.canUpload,
+      snapshot.can_upload,
+      snapshot.canUploadByHeader,
+    );
+    const sendable = canSend;
+    const inputable = canInput;
     const sendPhase = String(snapshot.sendPhase || snapshot.send_phase || 'unknown');
     const disabledReason = String(snapshot.disabledReason || snapshot.disabled_reason || '');
     let buttonColorRole = snapshot.buttonColorRole || snapshot.button_color_role || 'normal';
@@ -693,6 +624,9 @@
       anyToolboxOwnerRunning,
       pendingSend,
       realSendReady,
+      canSend,
+      canInput,
+      canUpload,
       sendable,
       inputable,
       sendPhase,
@@ -701,6 +635,41 @@
       source: source || snapshot.source || 'button-state',
       ts: now,
     };
+    if (
+      typeof ToolboxShell !== 'undefined'
+      && ToolboxShell
+      && typeof ToolboxShell.appendLogIfChanged === 'function'
+    ) {
+      const booleanConflict = !!(
+        snapshot.canSend === false
+        && (
+          snapshot.sendable === true
+          || snapshot.canSendByHeader === true
+        )
+      );
+      if (booleanConflict) {
+        ToolboxShell.appendLogIfChanged(
+          'BUTTON_AUTHORITY_BOOLEAN_CONFLICT_FIXED',
+          [
+            source || snapshot.source || '-',
+            snapshot.canSend === false ? 0 : snapshot.canSend === true ? 1 : '-',
+            snapshot.sendable === true ? 1 : 0,
+            snapshot.canSendByHeader === true ? 1 : 0,
+            canSend ? 1 : 0,
+          ].join('|'),
+          [
+            '[BUTTON_STATE][BOOLEAN_CONFLICT_FIXED]',
+            `source=${source || snapshot.source || '-'}`,
+            `rawCanSend=${snapshot.canSend === false ? 0 : snapshot.canSend === true ? 1 : '-'}`,
+            `legacySendable=${snapshot.sendable === true ? 1 : 0}`,
+            `canSendByHeader=${snapshot.canSendByHeader === true ? 1 : 0}`,
+            `finalCanSend=${canSend ? 1 : 0}`,
+            'rule=first-defined-authority-wins',
+          ].join(' '),
+          1000,
+        );
+      }
+    }
     return {
       ...snapshot,
       ...visualState,
@@ -726,6 +695,9 @@
         closedLoopRunning: normalized.closedLoopRunning,
         pendingSend: normalized.pendingSend,
         realSendReady: normalized.realSendReady,
+        canSend: normalized.canSend,
+        canInput: normalized.canInput,
+        canUpload: normalized.canUpload,
         sendable: normalized.sendable,
         inputable: normalized.inputable,
         sendPhase: normalized.sendPhase,
@@ -749,6 +721,9 @@
           closedLoopRunning: false,
           pendingSend: false,
           realSendReady: false,
+          canSend: false,
+          canInput: false,
+          canUpload: false,
           sendable: false,
           inputable: false,
           sendPhase: 'authority_error',
@@ -1355,10 +1330,6 @@
       return true;
     }
     return STABLE_LABEL_DYNAMIC_STATUS_INCLUDES.some((marker) => normalized.includes(marker));
-  }
-
-  function shouldAutoKeepStableButtonLabel(button) {
-    return isStableActionButton(button);
   }
 
   function markButtonStableLabel(button, label) {
@@ -2096,3 +2067,5 @@
     setButtonBaseAction,
     getButtonActionId,
   });
+
+

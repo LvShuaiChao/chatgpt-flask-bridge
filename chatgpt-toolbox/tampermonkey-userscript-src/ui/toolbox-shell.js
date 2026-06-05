@@ -6903,7 +6903,11 @@
             perfInc('titleFlash.stop.keydown', 1);
           }
         } catch (e) {
-          // ignore
+          const errText = e && e.message ? e.message : String(e);
+          console.warn('[TOOLBOX_TITLE_FLASH][STOP_KEYDOWN_PERF_INC_FAILED]', e);
+          if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+            ToolboxShell.appendLog(`[TOOLBOX_TITLE_FLASH][STOP_KEYDOWN_PERF_INC_FAILED] error=${errText}`);
+          }
         }
 
         // 默认关闭普通 keydown 日志，仅在性能调试模式下输出，且 1s 节流
@@ -7121,6 +7125,9 @@
     }
 
     function normalizeTab(tab) {
+      if (typeof getValidToolboxTabId === 'function') {
+        return getValidToolboxTabId(tab);
+      }
       const text = String(tab || '').trim();
       return VALID_TABS.includes(text) ? text : 'upload';
     }
@@ -8099,18 +8106,18 @@
             <div class="cgpt-toolbox-header-status-row cgpt-top-status-row" id="cgpt-toolbox-page-status-row"></div>
           </div>
 
-          <div class="cgpt-toolbox-tabs cgpt-top-tabs">
+          <div class="cgpt-toolbox-tabs cgpt-top-tabs" data-toolbox-tabs-root="1">
             <!-- upload tab：只改顶部标签显示名，内部仍然是 upload 模块 -->
-            <button type="button" class="cgpt-toolbox-tab active" data-tab="upload" data-full-label="首页" data-short-label="上传">首页</button>
-            <button type="button" class="cgpt-toolbox-tab" data-tab="autoq" data-full-label="自动指令" data-short-label="指令">自动指令</button>
-            <button type="button" class="cgpt-toolbox-tab" data-tab="prompt" data-full-label="Prompt 管理" data-short-label="Prompt">Prompt 管理</button>
-            <button type="button" class="cgpt-toolbox-tab" data-tab="bridge" data-full-label="浏览器桥接" data-short-label="桥接">浏览器桥接</button>
-            <button type="button" class="cgpt-toolbox-tab cgpt-export-tab" data-tab="export" data-full-label="导出统计" data-short-label="导出">导出统计</button>
-            <button type="button" class="cgpt-toolbox-tab cgpt-log-tab" data-tab="log" data-full-label="日志" data-short-label="日志">日志</button>
-            <button type="button" class="cgpt-toolbox-tab" data-tab="settings" data-full-label="设置" data-short-label="设置">设置</button>
+            <button type="button" class="cgpt-toolbox-tab active" data-tab="upload" data-toolbox-tab-id="upload" data-full-label="首页" data-short-label="上传">首页</button>
+            <button type="button" class="cgpt-toolbox-tab" data-tab="autoq" data-toolbox-tab-id="autoq" data-full-label="自动指令" data-short-label="指令">自动指令</button>
+            <button type="button" class="cgpt-toolbox-tab" data-tab="prompt" data-toolbox-tab-id="prompt" data-full-label="Prompt 管理" data-short-label="Prompt">Prompt 管理</button>
+            <button type="button" class="cgpt-toolbox-tab" data-tab="bridge" data-toolbox-tab-id="bridge" data-full-label="浏览器桥接" data-short-label="桥接">浏览器桥接</button>
+            <button type="button" class="cgpt-toolbox-tab cgpt-export-tab" data-tab="export" data-toolbox-tab-id="export" data-full-label="导出统计" data-short-label="导出">导出统计</button>
+            <button type="button" class="cgpt-toolbox-tab cgpt-log-tab" data-tab="log" data-toolbox-tab-id="log" data-full-label="日志" data-short-label="日志">日志</button>
+            <button type="button" class="cgpt-toolbox-tab" data-tab="settings" data-toolbox-tab-id="settings" data-full-label="设置" data-short-label="设置">设置</button>
           </div>
 
-          <div class="cgpt-toolbox-content">
+          <div class="cgpt-toolbox-content" data-toolbox-content-root="1">
             <div class="cgpt-toolbox-page active" data-page="upload">
               <div id="cgpt-upload-tab-host"></div>
             </div>
@@ -8368,6 +8375,14 @@
       qsa('.cgpt-toolbox-tab', root).forEach((btn) => {
         btn.addEventListener('click', () => {
           const tab = btn.getAttribute('data-tab');
+          console.warn('[TOOLBOX_TAB_CLICK]', {
+            tabId: tab,
+            title: btn.textContent || '',
+          });
+          if (typeof renderToolboxActiveTab === 'function') {
+            renderToolboxActiveTab(ToolboxShell, tab);
+            return;
+          }
           switchTab(tab);
         });
       });
@@ -8418,7 +8433,7 @@
       bindToolboxPageStateRouteWatcher();
     }
 
-    function switchTab(tab, options = {}) {
+    function applySwitchTabChrome(tab, options = {}) {
       let nextTab = normalizeTab(tab);
 
       // Tab / compact 切换按钮不受上传/发送/自动队列 running 状态影响，此处不做 disabled 门控。
@@ -8426,6 +8441,13 @@
       if (compactMode && nextTab !== 'upload') {
         appendLog(`[TOOLBOX_COMPACT][block-non-upload-tab] requested=${nextTab}`);
         nextTab = 'upload';
+      }
+
+      if (typeof ensureToolboxContentRoot === 'function') {
+        ensureToolboxContentRoot({
+          root,
+          contentRoot: qs('.cgpt-toolbox-content', root || document),
+        });
       }
 
       qsa('.cgpt-toolbox-tab', root).forEach((btn) => {
@@ -8437,6 +8459,10 @@
       });
 
       currentActiveTab = nextTab;
+
+      if (typeof setStoredToolboxActiveTabId === 'function') {
+        setStoredToolboxActiveTabId(nextTab);
+      }
 
       if (root) {
         root.dataset.activeTab = nextTab;
@@ -8466,6 +8492,10 @@
         panel.setAttribute('data-compact-active-tab', 'upload');
       }
 
+      if (typeof syncToolboxTabButtons === 'function') {
+        syncToolboxTabButtons(ToolboxShell, qs('.cgpt-toolbox-tabs', root), nextTab);
+      }
+
       const logModuleRef = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
       if (nextTab === 'log' && logModuleRef && typeof logModuleRef.flushDomIfNeeded === 'function') {
         logModuleRef.flushDomIfNeeded();
@@ -8489,6 +8519,24 @@
 
       scheduleToolboxHorizontalOverflowLog(`switch-tab:${nextTab}`, 0);
       syncToolboxHeaderLayout(`switch-tab:${nextTab}`);
+
+      return nextTab;
+    }
+
+    function switchTab(tab, options = {}) {
+      if (options._skipRender === true) {
+        return applySwitchTabChrome(tab, options);
+      }
+
+      if (typeof renderToolboxActiveTab === 'function') {
+        renderToolboxActiveTab(ToolboxShell, tab, {
+          ...options,
+          _fromSwitchTab: true,
+        });
+        return currentActiveTab;
+      }
+
+      return applySwitchTabChrome(tab, options);
     }
 
     function restoreActiveTab() {
@@ -13021,6 +13069,41 @@
     let lastTopAlertLogSignature = '';
     let isRefreshingTopStatusAlertSlot = false;
     let lastTopStatusAlertSlotSkipLogAt = 0;
+    let headerStatusRenderRaf = 0;
+    let headerStatusRenderReason = '';
+
+    function scheduleHeaderStatusRender(reason = '-') {
+      headerStatusRenderReason = headerStatusRenderReason
+        ? `${headerStatusRenderReason}|${reason || '-'}`
+        : String(reason || '-');
+      if (headerStatusRenderRaf) {
+        return;
+      }
+      const run = () => {
+        headerStatusRenderRaf = 0;
+        const mergedReason = headerStatusRenderReason || '-';
+        headerStatusRenderReason = '';
+        try {
+          if (typeof renderToolboxHeaderStatus === 'function') {
+            renderToolboxHeaderStatus(`scheduled:${mergedReason}`);
+          }
+        } catch (error) {
+          console.error('[HEADER_STATUS][SCHEDULED_RENDER_FAILED]', error);
+        }
+        try {
+          if (typeof refreshTopStatusAlertSlot === 'function') {
+            refreshTopStatusAlertSlot(`scheduled:${mergedReason}`);
+          }
+        } catch (error) {
+          console.error('[TOOLBOX_TOP_ALERT][SCHEDULED_REFRESH_FAILED]', error);
+        }
+      };
+      if (typeof requestAnimationFrame === 'function') {
+        headerStatusRenderRaf = requestAnimationFrame(run);
+      } else {
+        headerStatusRenderRaf = window.setTimeout(run, 16);
+      }
+    }
 
     function logTopAlertEntry(alertEntry, reason = '-') {
       const signature = [
@@ -13180,7 +13263,7 @@
         if (root) {
           root.setAttribute('data-status-type', 'idle');
         }
-        refreshTopStatusAlertSlot('applyTopStatusEntry:empty');
+        scheduleHeaderStatusRender('applyTopStatusEntry:empty');
         return;
       }
 
@@ -13223,10 +13306,7 @@
             ? `${getToolboxTitle()} - ${latestStatusText}`
             : getToolboxTitle();
         }
-        if (typeof renderToolboxHeaderStatus === 'function') {
-          renderToolboxHeaderStatus(`setStatus:${opts.owner || 'ui'}:empty-badge`);
-        }
-        refreshTopStatusAlertSlot(`applyTopStatusEntry:empty-badge:${opts.owner || 'ui'}`);
+        scheduleHeaderStatusRender(`applyTopStatusEntry:empty-badge:${opts.owner || 'ui'}`);
         return;
       }
       const isTopMainStatus = isTopMainStatusDisplayText(latestStatusText, statusType, {
@@ -13290,10 +13370,7 @@
         }
       }
 
-      if (typeof renderToolboxHeaderStatus === 'function') {
-        renderToolboxHeaderStatus(`setStatus:${opts.owner || 'ui'}`);
-      }
-      refreshTopStatusAlertSlot(`applyTopStatusEntry:${opts.owner || 'ui'}`);
+      scheduleHeaderStatusRender(`applyTopStatusEntry:${opts.owner || 'ui'}`);
     }
 
     function setStatus(text, type, options) {
@@ -13365,10 +13442,7 @@
 
       const top = ToolboxStatusArbiter.getTop(now);
       applyTopStatusEntry(top);
-      if (typeof renderToolboxHeaderStatus === 'function') {
-        renderToolboxHeaderStatus(`setStatus-entry:${owner}`);
-      }
-      refreshTopStatusAlertSlot(`setStatus-entry:${owner}`);
+      scheduleHeaderStatusRender(`setStatus-entry:${owner}`);
     }
 
     function clearStatus(owner) {
@@ -13379,19 +13453,13 @@
       ToolboxStatusArbiter.clear(ownerKey);
       const top = ToolboxStatusArbiter.getTop(Date.now());
       applyTopStatusEntry(top);
-      if (typeof renderToolboxHeaderStatus === 'function') {
-        renderToolboxHeaderStatus(`clearStatus:${ownerKey}`);
-      }
-      refreshTopStatusAlertSlot(`clearStatus:${ownerKey}`);
+      scheduleHeaderStatusRender(`clearStatus:${ownerKey}`);
     }
 
     function refreshStatus(reason = '') {
       const top = ToolboxStatusArbiter.getTop(Date.now());
       applyTopStatusEntry(top);
-      if (typeof renderToolboxHeaderStatus === 'function') {
-        renderToolboxHeaderStatus(`refreshStatus:${reason || '-'}`);
-      }
-      refreshTopStatusAlertSlot(`refreshStatus:${reason || '-'}`);
+      scheduleHeaderStatusRender(`refreshStatus:${reason || '-'}`);
       if (reason) {
         appendLog(`[STATUS_ARBITER][REFRESH] reason=${reason}`);
       }
@@ -13688,7 +13756,8 @@
             perfInc('log.append', 1);
           }
         } catch (e) {
-          // ignore
+          const errText = e && e.message ? e.message : String(e);
+          console.warn('[TOOLBOX_LOG][APPEND_PERF_INC_FAILED]', e);
         }
         const logModule = globalThis.__CGPT_TOOLBOX_LOG_MODULE__;
         if (logModule && typeof logModule.add === 'function') {
@@ -14064,8 +14133,189 @@
       appendLog(`[TOOLBOX_PAGE_STATE][route-watch-bind] toolboxRouteKey=${lastToolboxRouteKey}`);
     }
 
-    return {
+    function bindGlobalButtons(reason = '') {
+      if (
+        typeof UploadModule !== 'undefined'
+        && typeof UploadModule.ensureGlobalActionInfrastructure === 'function'
+      ) {
+        UploadModule.ensureGlobalActionInfrastructure(`toolbox-shell:${reason || '-'}`);
+      }
+      const uploadRoot = document.querySelector('#cgpt-upload-module');
+      if (
+        uploadRoot instanceof HTMLElement
+        && typeof UploadModule !== 'undefined'
+        && typeof UploadModule.mount === 'function'
+        && !uploadRoot.dataset.uploadEventsBound
+      ) {
+        appendLog(`[TOOLBOX_SHELL][BIND_GLOBAL_BUTTONS][WAIT_UPLOAD_DOM] reason=${reason || '-'}`);
+      }
+      appendLog(`[TOOLBOX_SHELL][BIND_GLOBAL_BUTTONS] reason=${reason || '-'}`);
+    }
+
+    const TOOLBOX_SHELL_ACTION_MAP = Object.freeze({
+      upload_start: 'start-upload',
+      send: 'send-message',
+      combo_send_copy_hotkey: 'send-copy-hotkey',
+      copy_hotkey: 'copy-hotkey-once',
+      copy_continue: 'copy-and-continue',
+      infinite_continue: 'auto-continue',
+      infinite_continue_to_done: 'auto-continue-until-done',
+      copy_last_reply: 'copy-only',
+      copy_log: 'copy-log',
+      back_home: 'click-new-chat',
+      copy_hotkey_continue: 'copy-hotkey-continue',
+      infinite_copy_hotkey_continue: 'loop-copy-hotkey-continue',
+      closed_loop_1_upload: 'closed-loop-with-hotkey-upload-every-round',
+      closed_loop_5_upload: 'closed-loop-with-hotkey',
+      closed_loop_dialog_5_upload: 'closed-loop-without-hotkey',
+    });
+
+    function dispatchShellToolboxAction(action, button, source = '') {
+      const toolboxAction = String(action || '').trim();
+      const canonicalAction = TOOLBOX_SHELL_ACTION_MAP[toolboxAction] || toolboxAction;
+      const isClosedLoopToolboxAction = toolboxAction.startsWith('closed_loop_');
+      const buttonMode = button && button.getAttribute
+        ? (button.getAttribute('data-closed-loop-mode') || '')
+        : '';
+      if (isClosedLoopToolboxAction) {
+        console.warn('[CLOSED_LOOP_BUTTON_CLICK]', {
+          action: canonicalAction,
+          toolboxAction,
+          source: source || 'global-buttons-delegate',
+          mode: buttonMode || '-',
+        });
+        appendLog(
+          `[CLOSED_LOOP_BUTTON_CLICK] action=${canonicalAction} toolboxAction=${toolboxAction} source=${source || 'global-buttons-delegate'} mode=${buttonMode || '-'}`,
+        );
+      }
+      if (
+        typeof ToolboxActionDispatch !== 'undefined'
+        && ToolboxActionDispatch
+        && typeof ToolboxActionDispatch.dispatchToolboxAction === 'function'
+      ) {
+        return ToolboxActionDispatch.dispatchToolboxAction(canonicalAction, {
+          source: source || 'global-buttons-delegate',
+          button,
+          toolboxAction,
+        });
+      }
+      if (typeof UploadModule !== 'undefined' && typeof UploadModule.handleAction === 'function') {
+        UploadModule.handleAction(canonicalAction, {
+          source: source || 'global-buttons-delegate',
+          button,
+          toolboxAction,
+        });
+        return true;
+      }
+      if (isClosedLoopToolboxAction) {
+        console.error('[CLOSED_LOOP][DISPATCH_FAILED]', {
+          action: canonicalAction,
+          toolboxAction,
+          source: source || 'global-buttons-delegate',
+          mode: buttonMode || '-',
+        });
+        appendLog(
+          `[CLOSED_LOOP][DISPATCH_FAILED] action=${canonicalAction} toolboxAction=${toolboxAction} source=${source || 'global-buttons-delegate'} mode=${buttonMode || '-'}`,
+        );
+      }
+      console.error('[GLOBAL_BUTTON_ACTION_MISSING]', {
+        action: toolboxAction,
+        canonicalAction,
+        text: button && button.textContent ? button.textContent : '',
+      });
+      return false;
+    }
+
+    function enableGlobalButtons(reason = '') {
+      console.warn('[GLOBAL_BUTTONS_ENABLE][START]', { reason: reason || '-' });
+
+      const shellRoot = root
+        || document.querySelector('[data-xz-toolbox-root]')
+        || document.querySelector('#cgpt-toolbox-root')
+        || document.getElementById(APP.panelId)
+        || document;
+
+      if (!shellRoot) {
+        console.error('[GLOBAL_BUTTONS_ENABLE][ROOT_MISSING]');
+        return;
+      }
+
+      if (window.__cgptGlobalButtonsDelegatedBound) {
+        console.warn('[GLOBAL_BUTTONS_ENABLE][SKIP_ALREADY_BOUND]');
+      } else {
+        window.__cgptGlobalButtonsDelegatedBound = true;
+        shellRoot.addEventListener('click', (event) => {
+          const btn = event.target && event.target.closest
+            ? event.target.closest('[data-toolbox-action]')
+            : null;
+          if (!btn) {
+            return;
+          }
+          const toolboxAction = btn.getAttribute('data-toolbox-action') || '';
+          console.warn('[GLOBAL_BUTTON_CLICK]', {
+            action: toolboxAction,
+            text: btn.textContent || '',
+          });
+          try {
+            dispatchShellToolboxAction(toolboxAction, btn, 'global-buttons-delegate');
+          } catch (error) {
+            console.error('[GLOBAL_BUTTON_ACTION_ERROR]', {
+              action: toolboxAction,
+              errorMessage: error && error.message ? error.message : String(error),
+              stack: error && error.stack ? error.stack : '',
+            });
+          }
+        });
+      }
+
+      const panelEl = document.getElementById(APP.panelId);
+      const scope = panelEl || shellRoot;
+      const globalActionSelectors = [
+        '[data-action="send-message"]',
+        '[data-action="send-copy-hotkey"]',
+        '[data-action="copy-hotkey-once"]',
+        '[data-action="copy-and-continue"]',
+        '[data-action="auto-continue"]',
+        '[data-action="start-upload"]',
+        '[data-toolbox-action]',
+      ];
+      globalActionSelectors.forEach((selector) => {
+        scope.querySelectorAll(selector).forEach((button) => {
+          if (!(button instanceof HTMLButtonElement)) {
+            return;
+          }
+          if (button.dataset.preserveDisabled === '1') {
+            return;
+          }
+          button.disabled = false;
+          button.removeAttribute('aria-disabled');
+          button.classList.remove('cgpt-btn-disabled');
+        });
+      });
+
+      console.warn('[GLOBAL_BUTTONS_ENABLE][DONE]', { reason: reason || '-' });
+      appendLog(`[TOOLBOX_SHELL][ENABLE_GLOBAL_BUTTONS] reason=${reason || '-'}`);
+    }
+
+    function refreshTopStatus(reason = '') {
+      if (typeof buildToolboxModuleStatusText === 'function') {
+        const text = buildToolboxModuleStatusText(ToolboxShell);
+        appendLog(`[TOOLBOX_SHELL][TOP_STATUS] ${text} reason=${reason || '-'}`);
+      }
+      if (typeof renderToolboxTopStatus === 'function') {
+        renderToolboxTopStatus({ heavy: false, reason: reason || 'refreshTopStatus' });
+      }
+    }
+
+    const shellApi = {
+      get root() { return root; },
+      get panel() { return panel; },
+      tabsRoot: null,
+      contentRoot: null,
       create,
+      bindGlobalButtons,
+      enableGlobalButtons,
+      refreshTopStatus,
       getHost,
       setStatus,
       clearStatus,
@@ -14110,562 +14360,11 @@
       logBatchStatusLayoutDebug,
       logNestedScrollContainers,
       repairToolboxLayoutIfCompressed,
+      __applySwitchTabChrome: applySwitchTabChrome,
     };
+
+    window.__XZ_TOOLBOX_SHELL__ = shellApi;
+    return shellApi;
   })();
 
-  function isChatSidebarElement(el) {
-    if (!el || !el.closest) return false;
-
-    return !!el.closest(
-      [
-        'aside',
-        'nav',
-        '[data-testid*="sidebar"]',
-        '[data-testid*="history"]',
-        '[aria-label*="历史"]',
-        '[aria-label*="聊天"]',
-        '[aria-label*="Chat history"]',
-        '[aria-label*="conversation"]',
-      ].join(','),
-    );
-  }
-
-  const COMPOSER_AREA_SELECTORS_FOR_MESSAGE = [
-    '[data-testid="composer"]',
-    '#prompt-textarea',
-    'textarea[name="prompt-textarea"]',
-    '[data-testid="composer-textarea"]',
-    '[contenteditable="true"][data-lexical-editor="true"]',
-    'div[contenteditable="true"][role="textbox"]',
-  ].join(',');
-
-  function isInComposerArea(el) {
-    if (!el) return false;
-    return !!el.closest(COMPOSER_AREA_SELECTORS_FOR_MESSAGE);
-  }
-
-  function getMessageContentElement(el) {
-    if (!el) return null;
-
-    const nodes = getMessageContentElements(el);
-    if (nodes.length > 0) {
-      return nodes[0];
-    }
-
-    return el;
-  }
-
-  function getMessageContentElements(el) {
-    if (!el) return [];
-
-    const selectors = [
-      '[data-message-author-role="assistant"] .markdown',
-      '[data-message-author-role="assistant"] [data-message-content]',
-      '[data-message-author-role="assistant"] .whitespace-pre-wrap',
-      '[data-message-author-role="assistant"] [class*="markdown"]',
-
-      '[data-message-author-role="user"] [data-message-content]',
-      '[data-message-author-role="user"] .whitespace-pre-wrap',
-
-      '.markdown',
-      '[data-message-content]',
-      '[class*="markdown"]',
-      '.whitespace-pre-wrap',
-      'pre',
-      'code',
-    ];
-
-    const nodes = [];
-
-    selectors.forEach((selector) => {
-      qsa(selector, el).forEach((node) => {
-        if (!(node instanceof HTMLElement)) return;
-        if (isInToolbox(node)) return;
-        if (isInComposerArea(node)) return;
-        if (isChatSidebarElement(node)) return;
-
-        const text = String(node.innerText || node.textContent || '').trim();
-        if (!text) return;
-
-        nodes.push(node);
-      });
-    });
-
-    const unique = [];
-    nodes.forEach((node) => {
-      const isInsideExisting = unique.some((old) => old !== node && old.contains(node));
-      if (isInsideExisting) return;
-
-      for (let i = unique.length - 1; i >= 0; i -= 1) {
-        if (node.contains(unique[i])) {
-          unique.splice(i, 1);
-        }
-      }
-
-      if (!unique.includes(node)) {
-        unique.push(node);
-      }
-    });
-
-    unique.sort((a, b) => {
-      if (a === b) return 0;
-      const pos = a.compareDocumentPosition(b);
-      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-      return 0;
-    });
-
-    return unique;
-  }
-
-  function extractCleanTextFromNode(node) {
-    if (!node) return '';
-
-    const clone = node.cloneNode(true);
-
-    clone.querySelectorAll([
-      'button',
-      'svg',
-      'style',
-      'script',
-      '[aria-hidden="true"]',
-      '[data-testid="copy-turn-action-button"]',
-      '[data-testid="feedback-actions"]',
-      '[data-testid*="feedback"]',
-      '[data-testid*="copy"]',
-      '[class*="text-token-text-tertiary"]',
-    ].join(',')).forEach((child) => {
-      child.remove();
-    });
-
-    const rawText = String(clone.innerText || clone.textContent || '');
-    return cleanCopiedMessageText(rawText);
-  }
-
-  function getFullMessageTextFromElement(el) {
-    if (!el) {
-      return {
-        text: '',
-        contentNodeCount: 0,
-        contentTextChars: 0,
-        fullTurnTextChars: 0,
-        source: 'empty',
-      };
-    }
-
-    const fullTurnEl =
-      el.closest &&
-      el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]')
-        ? el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]')
-        : el;
-
-    const contentNodes = getMessageContentElements(fullTurnEl);
-
-    const contentText = contentNodes
-      .map((node) => extractCleanTextFromNode(node))
-      .filter(Boolean)
-      .join('\n\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    const fullTurnText = extractCleanTextFromNode(fullTurnEl)
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    const cleanFn =
-      typeof ChatMessageExtractor !== 'undefined' &&
-      ChatMessageExtractor &&
-      typeof ChatMessageExtractor.cleanMessageText === 'function'
-        ? ChatMessageExtractor.cleanMessageText
-        : cleanCopiedMessageText;
-
-    const cleanedContentText = cleanFn(contentText);
-    const cleanedFullTurnText = cleanFn(fullTurnText);
-
-    const afterThinkingText = extractFinalAnswerAfterThinkingText(fullTurnText);
-    const cleanedAfterThinking = cleanFn(afterThinkingText);
-
-    if (shouldUseAfterThinkingCopyText(cleanedAfterThinking)) {
-      return {
-        text: cleanedAfterThinking,
-        contentNodeCount: contentNodes.length,
-        contentTextChars: cleanedContentText.length,
-        fullTurnTextChars: cleanedFullTurnText.length,
-        source: 'after-thinking',
-      };
-    }
-
-    let finalText = cleanedContentText;
-    let source = 'content-nodes';
-
-    if (
-      cleanedFullTurnText &&
-      (
-        !finalText ||
-        cleanedFullTurnText.length > finalText.length + 80 ||
-        cleanedFullTurnText.length > finalText.length * 1.3
-      )
-    ) {
-      finalText = cleanedFullTurnText;
-      source = 'full-turn-fallback';
-    }
-
-    return {
-      text: finalText,
-      contentNodeCount: contentNodes.length,
-      contentTextChars: cleanedContentText.length,
-      fullTurnTextChars: cleanedFullTurnText.length,
-      source,
-    };
-  }
-
-  function cleanCopiedMessageText(text) {
-    let value = String(text || '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    const lines = value.split('\n');
-
-    while (lines.length > 0) {
-      const first = String(lines[0] || '').trim();
-
-      if (
-        /^(ChatGPT\s*(说|said)|你说|You\s+said|用户说)$/i.test(first) ||
-        /^(ChatGPT\s*(说|said)|你说|You\s+said|用户说)\s*[:：]$/i.test(first)
-      ) {
-        lines.shift();
-        continue;
-      }
-
-      break;
-    }
-
-    value = lines.join('\n').trim();
-
-    value = value
-      .replace(/^(ChatGPT\s*(说|said)|你说|You\s+said|用户说)\s*[:：]\s*/i, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    return value;
-  }
-
-  function getVisibleTextFromElement(el) {
-    if (!el) return '';
-
-    const contentEl = getMessageContentElement(el) || el;
-    const clone = contentEl.cloneNode(true);
-
-    clone.querySelectorAll([
-      'button',
-      'svg',
-      'style',
-      'script',
-      '[aria-hidden="true"]',
-      '[data-testid="copy-turn-action-button"]',
-      '[data-testid="feedback-actions"]',
-      '[data-testid*="feedback"]',
-      '[data-testid*="copy"]',
-      '[class*="text-token-text-tertiary"]',
-    ].join(',')).forEach((node) => {
-      node.remove();
-    });
-
-    const rawText = String(clone.textContent || clone.innerText || '');
-    const fullTurnRawText = el !== contentEl
-      ? String(el.textContent || el.innerText || '')
-      : rawText;
-
-    const afterThinking = extractFinalAnswerAfterThinkingText(fullTurnRawText);
-
-    if (afterThinking && afterThinking.length >= 20) {
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog(
-          `[CHAT_PAGE][message-extract-after-thinking] chars=${afterThinking.length}`,
-        );
-      }
-
-      return (
-        typeof ChatMessageExtractor !== 'undefined' &&
-        ChatMessageExtractor &&
-        typeof ChatMessageExtractor.cleanMessageText === 'function'
-          ? ChatMessageExtractor.cleanMessageText(afterThinking)
-          : cleanCopiedMessageText(afterThinking)
-      );
-    }
-
-    return cleanCopiedMessageText(rawText);
-  }
-
-  function findConversationMessageElements(options = {}) {
-    const includeHidden = options.includeHidden === true;
-    const selectors = [
-      'article[data-testid^="conversation-turn-"]',
-      '[data-testid^="conversation-turn-"]',
-      '[data-message-author-role]',
-    ];
-
-    const seen = new Set();
-    const result = [];
-
-    selectors.forEach((selector) => {
-      qsa(selector).forEach((el) => {
-        if (!(el instanceof HTMLElement)) return;
-        if (isInToolbox(el)) return;
-
-        const container = el.closest(
-          'article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]'
-        ) || el;
-
-        if (!(container instanceof HTMLElement)) return;
-        if (seen.has(container)) return;
-        if (isInToolbox(container)) return;
-
-        if (!includeHidden) {
-          const rect = container.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) return;
-        }
-
-        seen.add(container);
-        result.push(container);
-      });
-    });
-
-    result.sort((a, b) => {
-      if (a === b) return 0;
-      const pos = a.compareDocumentPosition(b);
-      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-      return 0;
-    });
-
-    return result;
-  }
-
-  function getMessageRole(el) {
-    if (!el) return '';
-
-    const direct = el.getAttribute('data-message-author-role');
-    if (direct) return String(direct || '').toLowerCase();
-
-    const roleNode = el.querySelector('[data-message-author-role]');
-    if (roleNode) {
-      return String(roleNode.getAttribute('data-message-author-role') || '').toLowerCase();
-    }
-
-    const text = String(el.getAttribute('data-testid') || '').toLowerCase();
-    if (text.includes('conversation-turn')) {
-      return '';
-    }
-
-    return '';
-  }
-
-  function getConversationTurnId(el) {
-    if (!el) return '';
-
-    const direct = el.getAttribute && el.getAttribute('data-testid');
-    if (direct && /^conversation-turn-/i.test(String(direct))) {
-      return String(direct);
-    }
-
-    const turn = el.closest && el.closest('article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]');
-    if (turn) {
-      return String(turn.getAttribute('data-testid') || '');
-    }
-
-    return '';
-  }
-
-  function isThinkingBoundaryLine(line) {
-    const text = String(line || '').trim();
-
-    if (!text) {
-      return false;
-    }
-
-    return (
-      /^已思考\s*(?:若干秒|几\s*秒|\d+)/.test(text) ||
-      /^已思考.*(?:秒|分钟|m|s|›|>)/i.test(text) ||
-      /^Thought for\s+\d+/i.test(text) ||
-      /^Thinking/i.test(text) ||
-      /^正在思考/.test(text)
-    );
-  }
-
-  function isThinkingUiNoiseLine(line) {
-    const text = String(line || '').trim();
-
-    if (!text) {
-      return false;
-    }
-
-    return (
-      isThinkingBoundaryLine(text) ||
-      text === '展开' ||
-      text === '收起' ||
-      text === 'Show more' ||
-      text === 'Show less'
-    );
-  }
-
-  function extractFinalAnswerAfterThinkingText(text) {
-    const raw = String(text || '').replace(/\r\n/g, '\n');
-
-    const normalized = raw
-      .replace(
-        /(已思考\s*(?:若干秒|几\s*秒|\d+\s*(?:秒|分钟|m|min|s)?(?:\s*\d+\s*s)?)(?:\s*[›>])?)/gi,
-        '\n$1\n',
-      )
-      .replace(
-        /(Thought for\s+\d+[^\n]*)/gi,
-        '\n$1\n',
-      )
-      .replace(
-        /(正在思考[^\n]*)/g,
-        '\n$1\n',
-      );
-
-    const lines = normalized.split('\n');
-
-    let boundaryIndex = -1;
-
-    for (let i = 0; i < lines.length; i += 1) {
-      if (isThinkingBoundaryLine(lines[i])) {
-        boundaryIndex = i;
-      }
-    }
-
-    if (boundaryIndex < 0) {
-      return '';
-    }
-
-    const afterLines = lines
-      .slice(boundaryIndex + 1)
-      .filter((line) => !isThinkingUiNoiseLine(line));
-
-    return afterLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  }
-
-  function shouldUseAfterThinkingCopyText(text) {
-    const t = String(text || '').trim();
-    if (!t) {
-      return false;
-    }
-    if (typeof isThinkingUiNoiseLine === 'function' && isThinkingUiNoiseLine(t)) {
-      return false;
-    }
-    if (t.includes('<<<XZ_TOOLBOX_BATCH_TASK_DONE_7F3B9C>>>')) {
-      return true;
-    }
-    if (t.includes('<<<CHATGPT_TOOLBOX_DONE>>>') || t.includes('__CHATGPT_TOOLBOX_DONE__')) {
-      return true;
-    }
-    return t.length >= 2;
-  }
-
-  function chooseAssistantFinalAnswerText(rawText, fallbackText, meta = {}) {
-    if (
-      typeof UploadCriticalRuntime !== 'undefined'
-      && UploadCriticalRuntime
-      && typeof UploadCriticalRuntime.isUploadCriticalMode === 'function'
-      && UploadCriticalRuntime.isUploadCriticalMode()
-    ) {
-      // 上传关键期只做轻量 fallback，避免触发 after-thinking 提取/重型清洗。
-      const cleanFn =
-        typeof ChatMessageExtractor !== 'undefined' &&
-        ChatMessageExtractor &&
-        typeof ChatMessageExtractor.cleanMessageText === 'function'
-          ? ChatMessageExtractor.cleanMessageText
-          : cleanCopiedMessageText;
-
-      const cleanedFallback = cleanFn(fallbackText || rawText || '');
-
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        ToolboxShell.appendLog('[UPLOAD_CRITICAL][SKIP_HEAVY_CHAT_SCAN] reason=uploading');
-      }
-
-      return {
-        text: String(cleanedFallback || '').trim(),
-        source: 'fallback-content',
-        isStreaming: false,
-      };
-    }
-
-    const cleanFn =
-      typeof ChatMessageExtractor !== 'undefined' &&
-      ChatMessageExtractor &&
-      typeof ChatMessageExtractor.cleanMessageText === 'function'
-        ? ChatMessageExtractor.cleanMessageText
-        : cleanCopiedMessageText;
-
-    const cleanedRaw = cleanFn(rawText || '');
-    const cleanedFallback = cleanFn(fallbackText || '');
-
-    const afterThinking = extractFinalAnswerAfterThinkingText(rawText);
-    const cleanedAfterThinking = cleanFn(afterThinking || '');
-
-    if (shouldUseAfterThinkingCopyText(cleanedAfterThinking)) {
-      const streaming = (
-        (typeof isChatGPTActuallyBusyForTaskQueue === 'function' && isChatGPTActuallyBusyForTaskQueue())
-        || (
-          typeof ComposerApi !== 'undefined'
-          && typeof ComposerApi.isAssistantLikelyBusy === 'function'
-          && ComposerApi.isAssistantLikelyBusy()
-        )
-        || (
-          typeof hasRealChatGPTStopGeneratingButton === 'function'
-          && hasRealChatGPTStopGeneratingButton()
-        )
-      );
-
-      const closedLoopWaitPoll = (
-        (typeof window !== 'undefined' && window.__cgptClosedLoopWaitPollActive === true)
-        || meta.closedLoopWaitPoll === true
-      );
-      const pickSource = String(meta.pickSource || meta.source || '');
-      const isClosedLoopWaitPick = /wait-cycle|closed-loop-wait/i.test(pickSource);
-
-      if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
-        if (streaming && (closedLoopWaitPoll || isClosedLoopWaitPick)) {
-          // 闭环等待轮询期间不输出 streaming 重型 pick 日志。
-        } else {
-          const logTag = streaming
-            ? '[CHAT_PAGE][assistant-streaming-answer-picked]'
-            : '[CHAT_PAGE][assistant-final-answer-picked]';
-          ToolboxShell.appendLog(
-            `${logTag} source=after-thinking chars=${cleanedAfterThinking.length} fallbackChars=${String(cleanedFallback || '').length} turn=${meta.turnId || '-'}`,
-          );
-        }
-      }
-
-      return {
-        text: cleanedAfterThinking,
-        source: 'after-thinking',
-        isStreaming: streaming,
-      };
-    }
-
-    let finalText = cleanedFallback;
-    let source = 'fallback-content';
-
-    if (
-      cleanedRaw &&
-      (
-        !finalText ||
-        cleanedRaw.length > finalText.length + 80 ||
-        cleanedRaw.length > finalText.length * 1.3
-      )
-    ) {
-      finalText = cleanedRaw;
-      source = 'raw-full-turn';
-    }
-
-    return {
-      text: String(finalText || '').trim(),
-      source,
-    };
-  }
 

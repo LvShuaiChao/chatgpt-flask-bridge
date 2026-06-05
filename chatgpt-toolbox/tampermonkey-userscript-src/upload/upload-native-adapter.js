@@ -23,3 +23,5 @@ const UploadNativeAdapter = (() => {
 if (typeof window !== 'undefined') {
   window.UploadNativeAdapter = UploadNativeAdapter;
 }
+
+

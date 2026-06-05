@@ -16,3 +16,5 @@ const ClosedLoopUploadPolicy = (() => {
 if (typeof window !== 'undefined') {
   window.ClosedLoopUploadPolicy = ClosedLoopUploadPolicy;
 }
+
+

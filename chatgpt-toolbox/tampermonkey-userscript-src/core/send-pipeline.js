@@ -99,11 +99,78 @@
   }
 
   function sendPipelineReadCapability() {
+    try {
+      if (
+        typeof UploadModule !== 'undefined'
+        && UploadModule
+        && typeof UploadModule.getToolboxAuthorityState === 'function'
+      ) {
+        const authority = UploadModule.getToolboxAuthorityState('send-pipeline-audit', {
+          force: true,
+          cacheTtlMs: 0,
+        });
+        if (authority && authority.flags && authority.reply && authority.composer) {
+          const flags = authority.flags || {};
+          const reply = authority.reply || {};
+          const composer = authority.composer || {};
+          const raw = authority.raw || {};
+          const responseState = String(
+            raw.responseState
+            || reply.state
+            || '',
+          ).trim().toLowerCase();
+          const responseReason = String(
+            raw.responseReason
+            || reply.reason
+            || '',
+          ).trim().toLowerCase();
+          return {
+            source: 'toolbox-authority',
+            sendable: flags.canSend === true,
+            canSendNow: flags.canSend === true,
+            can_send_now: flags.canSend === true,
+            inputable: flags.canInput === true,
+            canAcceptInput: flags.canInput === true,
+            can_accept_input: flags.canInput === true,
+            isResponding: flags.replyBusy === true,
+            is_responding: flags.replyBusy === true,
+            response_state: responseState,
+            responseState,
+            response_state_reason: responseReason,
+            responseReason,
+            realSendReady: composer.realSendButtonReady === true,
+            real_send_ready: composer.realSendButtonReady === true,
+            composerTextLen: Number(composer.textLen || 0) || 0,
+            composerCount: Number(composer.composerCount || 0) || 0,
+            composerUploading: composer.composerUploading === true,
+          };
+        }
+      }
+    } catch (authErr) {
+      const errText = authErr && authErr.message ? authErr.message : String(authErr);
+      const errStack = authErr && authErr.stack ? String(authErr.stack) : '';
+      console.error('[SEND_PIPELINE][AUTHORITY_READ_FAILED]', authErr);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          `[SEND_PIPELINE][AUTHORITY_READ_FAILED] error=${errText} stack=${errStack.slice(0, 1200)}`,
+        );
+      }
+    }
     if (typeof getPageCapability !== 'function') {
       return {};
     }
     try {
-      return getPageCapability('send-pipeline-audit') || {};
+      const legacyCapability = getPageCapability('send-pipeline-audit-legacy-fallback') || {};
+      console.warn('[SEND_PIPELINE][LEGACY_CAPABILITY_FALLBACK_USED]', legacyCapability);
+      if (typeof ToolboxShell !== 'undefined' && ToolboxShell && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog(
+          '[SEND_PIPELINE][LEGACY_CAPABILITY_FALLBACK_USED] reason=authority-unavailable',
+        );
+      }
+      return {
+        ...legacyCapability,
+        source: 'legacy-capability-fallback',
+      };
     } catch (capErr) {
       console.error('[SEND_PIPELINE][ERROR]', capErr);
       return {};
@@ -318,9 +385,12 @@
   async function sendPipelineWriteAndVerifyText(prompt, source, retryIndex, ctx) {
     const text = String(prompt || '');
 
-    const beforeSendable = typeof ComposerApi.canSendNow === 'function'
-      ? (ComposerApi.canSendNow() ? 1 : 0)
-      : 0;
+    const beforeCapability = sendPipelineReadCapability();
+    const beforeSendable = !!(
+      beforeCapability.canSendNow
+      || beforeCapability.can_send_now
+      || beforeCapability.sendable
+    ) ? 1 : 0;
 
     if (typeof ComposerApi.clearComposerValue === 'function') {
       ComposerApi.clearComposerValue();
@@ -360,9 +430,12 @@
       };
 
     if (check.ok) {
-      const afterSendable = typeof ComposerApi.canSendNow === 'function'
-        ? (ComposerApi.canSendNow() ? 1 : 0)
-        : 0;
+      const afterCapability = sendPipelineReadCapability();
+      const afterSendable = !!(
+        afterCapability.canSendNow
+        || afterCapability.can_send_now
+        || afterCapability.sendable
+      ) ? 1 : 0;
       try {
         const taskIndex = (typeof state !== 'undefined' && state && state.taskRun)
           ? Number(state.taskRun.currentIndex || 0) + 1
@@ -373,7 +446,11 @@
           );
         }
       } catch (e) {
-        // ignore log failures
+        const errText = e && e.message ? e.message : String(e);
+        console.warn('[SEND_PIPELINE][SENDABLE_RECHECK_LOG_FAILED]', e);
+        if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+          ToolboxShell.appendLog(`[SEND_PIPELINE][SENDABLE_RECHECK_LOG_FAILED] error=${errText}`);
+        }
       }
       sendPipelineLog('[SEND_PIPELINE][TEXT_VERIFY_OK]', {
         source: ctx.source,
@@ -538,9 +615,7 @@
         return { ok: false, reason: detail.reason };
       }
 
-      const capability = typeof getPageCapability === 'function'
-        ? getPageCapability('send-pipeline-wait-button')
-        : {};
+      const capability = sendPipelineReadCapability();
       let sendSnap = null;
       if (typeof getComposerSendButtonSnapshot === 'function') {
         sendSnap = getComposerSendButtonSnapshot({ silent: true });
@@ -840,9 +915,7 @@
     const finalSendSnap = typeof getComposerSendButtonSnapshot === 'function'
       ? getComposerSendButtonSnapshot({ silent: true })
       : { found: false, ready: false };
-    const finalCapability = typeof getPageCapability === 'function'
-      ? getPageCapability('send-pipeline-wait-button-final')
-      : {};
+    const finalCapability = sendPipelineReadCapability();
     const finalNativeReady = sendPipelineIsNativeSendButtonReady(finalSendSnap, finalCapability);
     const blockEnterFallback = typeof shouldBlockEnterFallbackForComposer === 'function'
       && shouldBlockEnterFallbackForComposer();
@@ -1923,3 +1996,5 @@
       timeoutMs: safeTimeoutMs,
     };
   }
+
+

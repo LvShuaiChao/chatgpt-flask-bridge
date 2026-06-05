@@ -18,6 +18,177 @@ const MODULE_NAMES = Object.freeze([
   'SettingsModule',
 ]);
 
+const TOOLBOX_BOOT_FEATURE_DEFAULTS = Object.freeze({
+  uploadModule: true,
+  autoQueueModule: true,
+  promptManagerModule: true,
+  bridgeModule: false,
+  exportModule: false,
+  logModule: true,
+  settingsModule: true,
+  runtimeStatsModule: false,
+  browserRuntimeHealth: false,
+  advancedDebug: false,
+});
+
+function readToolboxBootFeatureFlag(name, fallbackValue) {
+  const key = String(name || '').trim();
+  if (!key) {
+    return fallbackValue === true;
+  }
+
+  try {
+    if (typeof MemoryManager !== 'undefined' && typeof MemoryManager.get === 'function') {
+      const stored = MemoryManager.get(`bootFeature.${key}`, null);
+      if (stored === true || stored === false) {
+        return stored;
+      }
+    }
+  } catch (error) {
+    console.error('[TOOLBOX_BOOT_FEATURE][MEMORY_READ_FAILED]', {
+      name: key,
+      error,
+    });
+  }
+
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(`xzToolbox.bootFeature.${key}`);
+      if (raw === '1' || raw === 'true') {
+        return true;
+      }
+      if (raw === '0' || raw === 'false') {
+        return false;
+      }
+    }
+  } catch (error) {
+    console.error('[TOOLBOX_BOOT_FEATURE][LOCAL_STORAGE_READ_FAILED]', {
+      name: key,
+      error,
+    });
+  }
+
+  return fallbackValue === true;
+}
+
+function isToolboxBootFeatureEnabled(name) {
+  const key = String(name || '').trim();
+  const fallbackValue = Object.prototype.hasOwnProperty.call(TOOLBOX_BOOT_FEATURE_DEFAULTS, key)
+    ? TOOLBOX_BOOT_FEATURE_DEFAULTS[key]
+    : false;
+  return readToolboxBootFeatureFlag(key, fallbackValue);
+}
+
+function runToolboxAfterFirstPaint(fn, reason = '') {
+  const run = () => {
+    window.setTimeout(() => {
+      try {
+        fn();
+      } catch (error) {
+        console.error('[TOOLBOX_BOOT][AFTER_FIRST_PAINT_FAILED]', {
+          reason,
+          error,
+        });
+      }
+    }, 0);
+  };
+
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(run);
+  } else {
+    run();
+  }
+}
+
+function runToolboxDelayed(fn, delayMs, reason = '') {
+  const safeDelayMs = Math.max(0, Number(delayMs) || 0);
+  window.setTimeout(() => {
+    try {
+      fn();
+    } catch (error) {
+      console.error('[TOOLBOX_BOOT][DELAYED_TASK_FAILED]', {
+        reason,
+        delayMs: safeDelayMs,
+        error,
+      });
+    }
+  }, safeDelayMs);
+}
+
+function markOptionalModuleSkipped(moduleName, reason = '') {
+  const name = String(moduleName || '').trim();
+  if (!name) {
+    return;
+  }
+
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+    ToolboxShell.appendLog(`[TOOLBOX_MODULES][SKIPPED] module=${name} reason=${reason || '-'}`);
+  }
+
+  if (typeof updateModuleHealth === 'function') {
+    updateModuleHealth(name, {
+      ok: true,
+      reason: `skipped:${reason || '-'}`,
+    });
+  }
+}
+
+async function safeMountOptionalModule(moduleName, hostName, mountFn, reason = '') {
+  const name = String(moduleName || '').trim();
+  const host = String(hostName || '').trim();
+
+  if (!name || typeof mountFn !== 'function') {
+    console.error('[TOOLBOX_MODULES][OPTIONAL_MOUNT_INVALID]', {
+      moduleName,
+      hostName,
+      reason,
+    });
+    return false;
+  }
+
+  try {
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(`[TOOLBOX_MODULES][OPTIONAL_MOUNT_START] module=${name} reason=${reason || '-'}`);
+    }
+
+    const hostEl = typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.getHost === 'function'
+      ? ToolboxShell.getHost(host)
+      : null;
+
+    const result = mountFn(hostEl);
+
+    if (result && typeof result.then === 'function') {
+      await result;
+    }
+
+    updateModuleHealth(name, {
+      ok: true,
+      reason: `optional-mount:${reason || '-'}`,
+    });
+
+    if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+      ToolboxShell.appendLog(`[TOOLBOX_MODULES][OPTIONAL_MOUNT_OK] module=${name} reason=${reason || '-'}`);
+    }
+
+    return true;
+  } catch (error) {
+    console.error('[TOOLBOX_MODULES][OPTIONAL_MOUNT_FAILED]', {
+      moduleName: name,
+      hostName: host,
+      reason,
+      error,
+    });
+
+    updateModuleHealth(name, {
+      ok: false,
+      error: error && error.message ? error.message : String(error),
+      reason: `optional-mount-failed:${reason || '-'}`,
+    });
+
+    return false;
+  }
+}
+
 const ToolboxBootRuntime = {
   bootStartedAt: 0,
   bootCompleteToastShown: false,
@@ -25,6 +196,7 @@ const ToolboxBootRuntime = {
   moduleHealth: {},
 };
 if (typeof globalThis !== 'undefined') {
+  globalThis.__CGPT_TOOLBOX_BOOT_RUNTIME_READY__ = true;
   globalThis.__CGPT_TOOLBOX_MODULE_HEALTH__ = ToolboxBootRuntime.moduleHealth;
   globalThis.__CGPT_TOOLBOX_VERSION__ = TOOLBOX_SCRIPT_VERSION;
   globalThis.__CGPT_TOOLBOX_DIAG__ = () => {
@@ -133,6 +305,28 @@ function applyBootPhaseStatus(reason = '') {
   }
 
   const isBootGrace = shouldTreatModuleErrorAsTransient();
+  const bootPending = typeof toolboxGetRestoringModules === 'function'
+    ? toolboxGetRestoringModules(ToolboxShell)
+    : (typeof xzToolboxGetPendingModules === 'function' ? xzToolboxGetPendingModules() : []);
+  const bootReleased = typeof xzToolboxBootAllReadyOrFailed === 'function'
+    ? xzToolboxBootAllReadyOrFailed()
+    : bootPending.length === 0;
+
+  if (bootReleased && bootPending.length === 0 && !hasPersistentModuleFailure()) {
+    if (typeof ToolboxShell.clearStatus === 'function') {
+      ToolboxShell.clearStatus('system');
+      ToolboxShell.clearStatus('module-health');
+    }
+    if (isBootGrace) {
+      ToolboxShell.setStatus('初始化中', 'running', {
+        owner: 'system',
+        shortText: '初始化中',
+        persistent: true,
+        reason: reason || 'boot-grace',
+      });
+    }
+    return;
+  }
 
   if (hasPersistentModuleFailure() && !isBootGrace) {
     ToolboxShell.setStatus('模块失败（持续异常）', 'error', {
@@ -145,7 +339,35 @@ function applyBootPhaseStatus(reason = '') {
     return;
   }
 
+  if (bootPending.length > 0) {
+    ToolboxShell.setStatus('模块恢复中', 'warning', {
+      owner: 'system',
+      shortText: '恢复中',
+      persistent: true,
+      title: typeof buildToolboxModuleStatusText === 'function'
+        ? buildToolboxModuleStatusText(ToolboxShell)
+        : `模块恢复中：${bootPending.join(', ')}`,
+      reason: reason || 'module-boot-restoring',
+    });
+    return;
+  }
+
   if (hasAnyTransientModuleFailure()) {
+    const degraded = typeof toolboxGetDegradedModules === 'function'
+      ? toolboxGetDegradedModules(ToolboxShell)
+      : [];
+    if (degraded.length > 0) {
+      ToolboxShell.setStatus('部分模块降级', 'warning', {
+        owner: 'system',
+        shortText: '降级',
+        persistent: false,
+        title: typeof buildToolboxModuleStatusText === 'function'
+          ? buildToolboxModuleStatusText(ToolboxShell)
+          : `降级模块：${degraded.join(', ')}`,
+        reason: reason || 'module-degraded',
+      });
+      return;
+    }
     ToolboxShell.setStatus('模块恢复中', 'warning', {
       owner: 'system',
       shortText: '恢复中',
@@ -258,6 +480,14 @@ function cleanupStaleToolboxDomBeforeInit(reason = '') {
 
   document.documentElement.classList.remove('cgpt-toolbox-global-dragging');
   document.body.classList.remove('cgpt-toolbox-global-dragging');
+
+  if (window.__XZ_TOOLBOX_MODULE_WATCHDOG_STARTED__) {
+    console.warn('[TOOLBOX_INSTANCE_GUARD][CLEAR_LEGACY_WATCHDOG_FLAG]', {
+      reason,
+    });
+    delete window.__XZ_TOOLBOX_MODULE_WATCHDOG_STARTED__;
+  }
+  window.__XZ_TOOLBOX_MODULE_WATCHDOG_STARTED_AT__ = 0;
 }
 
 function installToolboxInstanceGuard() {
@@ -312,6 +542,27 @@ async function safeInitStep(name, fn) {
   }
 }
 
+function runAfterFirstPaint(fn) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      window.setTimeout(() => {
+        Promise.resolve()
+          .then(fn)
+          .then(resolve)
+          .catch((error) => {
+            console.error('[TOOLBOX_BOOT][DEFERRED_MOUNT_FAILED]', error);
+            reject(error);
+          });
+      }, 0);
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(run);
+    } else {
+      run();
+    }
+  });
+}
+
 async function mountAllModules(reason = 'init') {
   console.info('[TOOLBOX][MODULE_MOUNT_START]', { reason });
   if (reason === 'init' && !(ToolboxBootRuntime.bootStartedAt > 0)) {
@@ -322,6 +573,10 @@ async function mountAllModules(reason = 'init') {
   });
   applyBootPhaseStatus(`mount-start:${reason}`);
 
+  if (typeof startToolboxModuleWatchdog === 'function') {
+    startToolboxModuleWatchdog(ToolboxShell);
+  }
+
   if (typeof cleanupRuntimeHandles === 'function') {
     cleanupRuntimeHandles(`mount:${reason}`);
   }
@@ -331,51 +586,289 @@ async function mountAllModules(reason = 'init') {
   }
 
   const failedNames = [];
+  const recoveryTimeout = typeof TOOLBOX_MODULE_RECOVERY_TIMEOUT_MS === 'number'
+    ? TOOLBOX_MODULE_RECOVERY_TIMEOUT_MS
+    : 8000;
 
-  if (!await safeInitStep(`UploadModule.mount:${reason}`, async () => {
-    const initPromise = UploadModule.mount(ToolboxShell.getHost('upload'));
-    if (initPromise && typeof initPromise.then === 'function') {
-      await initPromise;
+  const coreMountTasks = [];
+
+  if (
+    isToolboxBootFeatureEnabled('uploadModule')
+    && typeof UploadModule !== 'undefined'
+    && typeof mountToolboxModuleDegraded === 'function'
+  ) {
+    coreMountTasks.push(
+      new Promise((resolve) => {
+        runToolboxAfterFirstPaint(() => {
+          void mountToolboxModuleDegraded(
+            ToolboxShell,
+            'UploadModule',
+            async ({ cancelToken }) => {
+              const initPromise = UploadModule.mount(ToolboxShell.getHost('upload'), {
+                cancelToken,
+              });
+              if (initPromise && typeof initPromise.then === 'function') {
+                await initPromise;
+              }
+            },
+            recoveryTimeout,
+            `after-first-paint:${reason}`,
+          )
+            .then(resolve)
+            .catch((error) => {
+              console.error('[TOOLBOX_BOOT][UPLOAD_MODULE_DELAYED_MOUNT_FAILED]', error);
+              resolve({
+                ok: false,
+                moduleName: 'UploadModule',
+                error,
+              });
+            });
+        }, `UploadModule.after-first-paint:${reason}`);
+      }),
+    );
+  } else {
+    markOptionalModuleSkipped('UploadModule', `feature-disabled-or-missing:${reason}`);
+  }
+
+  if (
+    isToolboxBootFeatureEnabled('autoQueueModule')
+    && typeof AutoQueueModule !== 'undefined'
+    && typeof mountToolboxModuleDegraded === 'function'
+  ) {
+    coreMountTasks.push(
+      new Promise((resolve) => {
+        runToolboxAfterFirstPaint(() => {
+          void mountToolboxModuleDegraded(
+            ToolboxShell,
+            'AutoQueueModule',
+            async ({ cancelToken }) => {
+              const uploadState = ToolboxShell.__moduleStates
+                && ToolboxShell.__moduleStates.UploadModule
+                ? ToolboxShell.__moduleStates.UploadModule.state
+                : '';
+
+              console.warn('[AUTO_QUEUE_INIT]', { uploadState });
+
+              if (cancelToken && cancelToken.cancelled) {
+                return;
+              }
+
+              if (uploadState === 'restoring') {
+                console.warn('[AUTO_QUEUE_INIT] UploadModule still restoring, continue without upload dependency');
+              }
+
+              if (uploadState === 'degraded' || uploadState === 'failed') {
+                console.warn(
+                  '[AUTO_QUEUE_INIT] UploadModule unavailable, upload-related queue actions disabled but auto queue continues',
+                  { uploadState },
+                );
+              }
+
+              const autoQueueMountResult = AutoQueueModule.mount(ToolboxShell.getHost('autoq'));
+              if (autoQueueMountResult && typeof autoQueueMountResult.then === 'function') {
+                await autoQueueMountResult;
+              }
+            },
+            5000,
+            `after-first-paint:${reason}`,
+          )
+            .then(resolve)
+            .catch((error) => {
+              console.error('[TOOLBOX_BOOT][AUTO_QUEUE_MODULE_DELAYED_MOUNT_FAILED]', error);
+              resolve({
+                ok: false,
+                moduleName: 'AutoQueueModule',
+                error,
+              });
+            });
+        }, `AutoQueueModule.after-first-paint:${reason}`);
+      }),
+    );
+  } else {
+    markOptionalModuleSkipped('AutoQueueModule', `feature-disabled-or-missing:${reason}`);
+  }
+
+  if (coreMountTasks.length === 0) {
+    console.error('[TOOLBOX_BOOT][CORE_MOUNT_FALLBACK] mountToolboxModuleDegraded missing, using legacy sequential mount');
+    if (typeof UploadModule !== 'undefined') {
+      try {
+        const initPromise = UploadModule.mount(ToolboxShell.getHost('upload'));
+        if (initPromise && typeof initPromise.then === 'function') {
+          await Promise.race([
+            initPromise,
+            new Promise((resolve) => window.setTimeout(resolve, recoveryTimeout)),
+          ]);
+        }
+      } catch (uploadMountError) {
+        console.error('[TOOLBOX_BOOT][UploadModule.mount][FALLBACK]', uploadMountError);
+        if (typeof xzToolboxSetModuleFailed === 'function') {
+          xzToolboxSetModuleFailed('UploadModule', uploadMountError);
+        }
+        failedNames.push('UploadModule');
+      }
     }
-  })) {
-    failedNames.push('UploadModule');
+    if (typeof AutoQueueModule !== 'undefined') {
+      try {
+        AutoQueueModule.mount(ToolboxShell.getHost('autoq'));
+        if (typeof xzToolboxSetModuleReady === 'function') {
+          xzToolboxSetModuleReady('AutoQueueModule');
+        }
+      } catch (autoqMountError) {
+        console.error('[TOOLBOX_BOOT][AutoQueueModule.mount][FALLBACK]', autoqMountError);
+        if (typeof xzToolboxSetModuleFailed === 'function') {
+          xzToolboxSetModuleFailed('AutoQueueModule', autoqMountError);
+        }
+        failedNames.push('AutoQueueModule');
+      }
+    }
   }
 
-  if (!await safeInitStep(`AutoQueueModule.mount:${reason}`, () => {
-    AutoQueueModule.mount(ToolboxShell.getHost('autoq'));
-  })) {
-    failedNames.push('AutoQueueModule');
+  const coreResults = await Promise.allSettled(coreMountTasks);
+  coreResults.forEach((settled, index) => {
+    if (settled.status === 'rejected') {
+      console.error('[TOOLBOX_MODULE_INIT_ALL_SETTLED_FAILED]', settled.reason, { index });
+      return;
+    }
+    const item = settled.value;
+    if (!item || item.ok !== true) {
+      failedNames.push(item && item.moduleName ? item.moduleName : 'unknown-core-module');
+      const moduleName = item && item.moduleName ? item.moduleName : '';
+      if (moduleName) {
+        updateModuleHealth(moduleName, {
+          ok: true,
+          reason: 'degraded-ready',
+        });
+      }
+    } else if (item.moduleName) {
+      updateModuleHealth(item.moduleName, {
+        ok: true,
+        reason: `mount:${reason}`,
+      });
+    }
+  });
+
+  const restoringAfterCore = typeof toolboxGetRestoringModules === 'function'
+    ? toolboxGetRestoringModules(ToolboxShell)
+    : [];
+  restoringAfterCore.forEach((moduleName) => {
+    if (typeof toolboxSetModuleState === 'function') {
+      toolboxSetModuleState(
+        ToolboxShell,
+        moduleName,
+        'degraded',
+        'forced degraded because module stayed restoring after init allSettled',
+      );
+    }
+    if (typeof xzToolboxSetModuleFailed === 'function') {
+      xzToolboxSetModuleFailed(
+        moduleName,
+        new Error('forced degraded after core allSettled'),
+      );
+    }
+    failedNames.push(moduleName);
+  });
+
+  if (typeof ToolboxShell.bindGlobalButtons === 'function') {
+    ToolboxShell.bindGlobalButtons(`after-core-mount:${reason}`);
+  }
+  if (typeof ToolboxShell.enableGlobalButtons === 'function') {
+    ToolboxShell.enableGlobalButtons(`after-core-mount:${reason}`);
   }
 
-  if (!await safeInitStep(`PromptManagerModule.mount:${reason}`, () => {
-    PromptManagerModule.mount(ToolboxShell.getHost('prompt'));
-  })) {
-    failedNames.push('PromptManagerModule');
-  }
+  runToolboxDelayed(() => {
+    if (!isToolboxBootFeatureEnabled('promptManagerModule')) {
+      markOptionalModuleSkipped('PromptManagerModule', `feature-disabled:${reason}`);
+      return;
+    }
 
-  if (!await safeInitStep(`BridgeModule.mount:${reason}`, () => {
-    BridgeModule.mount(ToolboxShell.getHost('bridge'));
-  })) {
-    failedNames.push('BridgeModule');
-  }
+    void safeMountOptionalModule(
+      'PromptManagerModule',
+      'prompt',
+      (hostEl) => {
+        if (typeof PromptManagerModule === 'undefined' || typeof PromptManagerModule.mount !== 'function') {
+          throw new Error('PromptManagerModule.mount is not available');
+        }
+        return PromptManagerModule.mount(hostEl);
+      },
+      `delayed:${reason}`,
+    );
+  }, 300, `PromptManagerModule.delayed:${reason}`);
 
-  if (!await safeInitStep(`ExportModule.mount:${reason}`, () => {
-    ExportModule.mount(ToolboxShell.getHost('export'));
-  })) {
-    failedNames.push('ExportModule');
-  }
+  runToolboxDelayed(() => {
+    if (!isToolboxBootFeatureEnabled('BridgeModule') && !isToolboxBootFeatureEnabled('bridgeModule')) {
+      markOptionalModuleSkipped('BridgeModule', `feature-disabled:${reason}`);
+      return;
+    }
 
-  if (!await safeInitStep(`LogModule.mount:${reason}`, () => {
-    LogModule.mount(ToolboxShell.getHost('log'));
-  })) {
-    failedNames.push('LogModule');
-  }
+    void safeMountOptionalModule(
+      'BridgeModule',
+      'bridge',
+      (hostEl) => {
+        if (typeof BridgeModule === 'undefined' || typeof BridgeModule.mount !== 'function') {
+          throw new Error('BridgeModule.mount is not available');
+        }
+        return BridgeModule.mount(hostEl);
+      },
+      `delayed:${reason}`,
+    );
+  }, 600, `BridgeModule.delayed:${reason}`);
 
-  if (!await safeInitStep(`SettingsModule.mount:${reason}`, () => {
-    SettingsModule.mount(ToolboxShell.getHost('settings'));
-  })) {
-    failedNames.push('SettingsModule');
-  }
+  runToolboxDelayed(() => {
+    if (!isToolboxBootFeatureEnabled('exportModule')) {
+      markOptionalModuleSkipped('ExportModule', `feature-disabled:${reason}`);
+      return;
+    }
+
+    void safeMountOptionalModule(
+      'ExportModule',
+      'export',
+      (hostEl) => {
+        if (typeof ExportModule === 'undefined' || typeof ExportModule.mount !== 'function') {
+          throw new Error('ExportModule.mount is not available');
+        }
+        return ExportModule.mount(hostEl);
+      },
+      `delayed:${reason}`,
+    );
+  }, 900, `ExportModule.delayed:${reason}`);
+
+  runToolboxDelayed(() => {
+    if (!isToolboxBootFeatureEnabled('logModule')) {
+      markOptionalModuleSkipped('LogModule', `feature-disabled:${reason}`);
+      return;
+    }
+
+    void safeMountOptionalModule(
+      'LogModule',
+      'log',
+      (hostEl) => {
+        if (typeof LogModule === 'undefined' || typeof LogModule.mount !== 'function') {
+          throw new Error('LogModule.mount is not available');
+        }
+        return LogModule.mount(hostEl);
+      },
+      `delayed:${reason}`,
+    );
+  }, 1200, `LogModule.delayed:${reason}`);
+
+  runToolboxDelayed(() => {
+    if (!isToolboxBootFeatureEnabled('settingsModule')) {
+      markOptionalModuleSkipped('SettingsModule', `feature-disabled:${reason}`);
+      return;
+    }
+
+    void safeMountOptionalModule(
+      'SettingsModule',
+      'settings',
+      (hostEl) => {
+        if (typeof SettingsModule === 'undefined' || typeof SettingsModule.mount !== 'function') {
+          throw new Error('SettingsModule.mount is not available');
+        }
+        return SettingsModule.mount(hostEl);
+      },
+      `delayed:${reason}`,
+    );
+  }, 1500, `SettingsModule.delayed:${reason}`);
 
   if (failedNames.length && typeof ToolboxShell !== 'undefined') {
     if (ToolboxShell.appendLog) {
@@ -391,8 +884,39 @@ async function mountAllModules(reason = 'init') {
   if (typeof ToolboxShell !== 'undefined' && ToolboxShell.appendLog) {
     ToolboxShell.appendLog(`[TOOLBOX_MODULES][MOUNT_DONE] reason=${reason}`);
   }
-  applyBootPhaseStatus(`mount-done:${reason}`);
 
+  const restoringBeforeDone = typeof toolboxGetRestoringModules === 'function'
+    ? toolboxGetRestoringModules(ToolboxShell)
+    : [];
+  if (restoringBeforeDone.length > 0) {
+    console.error('[TOOLBOX_MODULES_INIT][RESTORING_BEFORE_DONE_FORCE_DEGRADED]', {
+      restoringBeforeDone,
+    });
+    restoringBeforeDone.forEach((moduleName) => {
+      if (typeof toolboxSetModuleState === 'function') {
+        toolboxSetModuleState(
+          ToolboxShell,
+          moduleName,
+          'degraded',
+          'forced degraded before mountAllModules done',
+        );
+      }
+    });
+  }
+  if (typeof applyBootPhaseStatus === 'function') {
+    applyBootPhaseStatus(`mount-done:${reason}`);
+  }
+  if (typeof toolboxRefreshTopStatus === 'function') {
+    toolboxRefreshTopStatus(ToolboxShell);
+  } else if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.refreshTopStatus === 'function') {
+    ToolboxShell.refreshTopStatus(`mount-done:${reason}`);
+  }
+
+  console.warn('[TOOLBOX_MODULES_INIT][DONE]', {
+    restoringAfterDone: typeof toolboxGetRestoringModules === 'function'
+      ? toolboxGetRestoringModules(ToolboxShell)
+      : [],
+  });
   console.info('[TOOLBOX][MODULE_MOUNT_DONE]', { reason, failed: failedNames });
 }
 
@@ -435,6 +959,43 @@ async function initToolbox() {
       root: !!rootEl,
       panel: !!document.querySelector('#cgpt-toolbox-panel'),
     });
+
+    window.__XZ_TOOLBOX_SHELL__ = ToolboxShell;
+    if (ToolboxShell) {
+      ToolboxShell.tabsRoot = document.querySelector('.cgpt-toolbox-tabs');
+      ToolboxShell.contentRoot = document.querySelector('.cgpt-toolbox-content');
+    }
+
+    if (typeof renderToolboxTabs === 'function' && ToolboxShell) {
+      renderToolboxTabs(ToolboxShell, ToolboxShell.tabsRoot);
+    }
+    if (typeof renderToolboxActiveTab === 'function' && ToolboxShell) {
+      const earlyTabId = typeof getStoredToolboxActiveTabId === 'function'
+        ? getStoredToolboxActiveTabId()
+        : 'upload';
+      renderToolboxActiveTab(ToolboxShell, earlyTabId, {
+        save: false,
+        reason: 'shell-create-early',
+      });
+    } else if (typeof ToolboxShell.restoreActiveTab === 'function') {
+      ToolboxShell.restoreActiveTab();
+    }
+
+    if (typeof ToolboxShell.bindGlobalButtons === 'function') {
+      ToolboxShell.bindGlobalButtons('shell-create-early');
+    }
+    if (typeof ToolboxShell.enableGlobalButtons === 'function') {
+      ToolboxShell.enableGlobalButtons('shell-create-early');
+    }
+    if (
+      typeof UploadModule !== 'undefined'
+      && typeof UploadModule.ensureGlobalActionInfrastructure === 'function'
+    ) {
+      UploadModule.ensureGlobalActionInfrastructure('shell-create-early');
+    }
+    if (typeof startToolboxModuleWatchdog === 'function') {
+      startToolboxModuleWatchdog(ToolboxShell);
+    }
   } catch (e) {
     const errText = e && e.message ? e.message : String(e);
     const errStack = e && e.stack ? e.stack : '(no stack)';
@@ -500,6 +1061,23 @@ async function initToolbox() {
 
   await mountAllModules('init');
 
+  if (typeof renderToolboxTabs === 'function' && typeof ToolboxShell !== 'undefined') {
+    ToolboxShell.tabsRoot = document.querySelector('.cgpt-toolbox-tabs');
+    ToolboxShell.contentRoot = document.querySelector('.cgpt-toolbox-content');
+    renderToolboxTabs(ToolboxShell, ToolboxShell.tabsRoot);
+  }
+  if (typeof renderToolboxActiveTab === 'function' && typeof ToolboxShell !== 'undefined') {
+    const activeTabId = typeof getStoredToolboxActiveTabId === 'function'
+      ? getStoredToolboxActiveTabId()
+      : (typeof ToolboxShell.getActiveTab === 'function' ? ToolboxShell.getActiveTab() : 'upload');
+    renderToolboxActiveTab(ToolboxShell, activeTabId, {
+      reason: 'post-module-mount',
+    });
+  }
+  if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.refreshTopStatus === 'function') {
+    ToolboxShell.refreshTopStatus('post-module-mount');
+  }
+
   await safeInitStep('GlobalUsageStore.initGlobalUsageSync', () => {
     if (typeof GlobalUsageStore !== 'undefined' && typeof GlobalUsageStore.initGlobalUsageSync === 'function') {
       GlobalUsageStore.initGlobalUsageSync();
@@ -507,6 +1085,13 @@ async function initToolbox() {
   });
 
   await safeInitStep('BrowserRuntimeHealth.start', () => {
+    if (!isToolboxBootFeatureEnabled('browserRuntimeHealth')) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog('[TOOLBOX_MODULES][SKIPPED] module=BrowserRuntimeHealth reason=feature-disabled');
+      }
+      return;
+    }
+
     if (typeof BrowserRuntimeHealth !== 'undefined' && typeof BrowserRuntimeHealth.start === 'function') {
       BrowserRuntimeHealth.start();
     }
@@ -517,13 +1102,13 @@ async function initToolbox() {
   });
 
   await safeInitStep('ToolboxShell.applyPageState', async () => {
-    const waitUpload = typeof UploadModule !== 'undefined'
-      && typeof UploadModule.getUploadInitPromise === 'function'
-      ? UploadModule.getUploadInitPromise()
-      : Promise.resolve();
-
-    await waitUpload;
     ToolboxShell.applyToolboxPageState('init');
+    if (typeof UploadModule !== 'undefined' && typeof UploadModule.getUploadInitPromise === 'function') {
+      void UploadModule.getUploadInitPromise()
+        .catch((waitError) => {
+          console.error('[TOOLBOX_BOOT][UPLOAD_INIT_PROMISE_FAILED]', waitError);
+        });
+    }
   });
 
   await safeInitStep('registerRuntimeDebugApis', () => {
@@ -555,6 +1140,13 @@ async function initToolbox() {
   });
 
   await safeInitStep('RuntimeStatsModule.onAppStart', () => {
+    if (!isToolboxBootFeatureEnabled('runtimeStatsModule')) {
+      if (typeof ToolboxShell !== 'undefined' && typeof ToolboxShell.appendLog === 'function') {
+        ToolboxShell.appendLog('[TOOLBOX_MODULES][SKIPPED] module=RuntimeStatsModule reason=feature-disabled');
+      }
+      return;
+    }
+
     if (typeof RuntimeStatsModule !== 'undefined' && typeof RuntimeStatsModule.onAppStart === 'function') {
       RuntimeStatsModule.onAppStart();
     }
@@ -571,15 +1163,25 @@ async function initToolbox() {
     ToolboxBootRuntime.bootCompleteToastShown = true;
     ToolboxBootRuntime.bootCompleteAt = Date.now();
 
-    const moduleHealth = ToolboxBootRuntime.moduleHealth || {};
-    const failedNames = Object.keys(moduleHealth).filter((name) => {
-      const item = moduleHealth[name];
-      return item && item.ok === false && Number(item.failCount || 0) >= 1;
-    });
+    const bootStatusText = typeof buildToolboxModuleStatusText === 'function'
+      ? buildToolboxModuleStatusText(ToolboxShell)
+      : (typeof getToolboxBootStatusText === 'function' ? getToolboxBootStatusText() : '工具箱已加载');
+    const bootPending = typeof toolboxGetRestoringModules === 'function'
+      ? toolboxGetRestoringModules(ToolboxShell)
+      : [];
+    const bootDegraded = typeof toolboxGetDegradedModules === 'function'
+      ? toolboxGetDegradedModules(ToolboxShell)
+      : [];
 
-    if (failedNames.length > 0) {
-      ToolboxShell.showToast(`工具箱已加载，部分模块恢复中：${failedNames.join('、')}`, 'warn', 3200);
-      ToolboxShell.appendLog(`[TOOLBOX_BOOT][TOAST] partial=${failedNames.join('|')}`);
+    if (bootPending.length > 0) {
+      ToolboxShell.showToast(bootStatusText, 'warn', 3200);
+      ToolboxShell.appendLog(`[TOOLBOX_BOOT][TOAST] pending=${bootPending.join('|')}`);
+      return;
+    }
+
+    if (bootDegraded.length > 0) {
+      ToolboxShell.showToast(bootStatusText, 'warn', 3600);
+      ToolboxShell.appendLog(`[TOOLBOX_BOOT][TOAST] degraded=${bootDegraded.join('|')}`);
       return;
     }
 
@@ -637,3 +1239,4 @@ if (document.readyState === 'loading') {
 } else {
   void boot();
 }
+
